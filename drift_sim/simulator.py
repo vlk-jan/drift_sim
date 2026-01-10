@@ -179,6 +179,9 @@ class DPhysicsEngine(torch.nn.Module):
 
         # Torque: r x F
         torque_per_wheel = torch.linalg.cross(r, F_net_wheels)
+        torque_per_wheel = torch.clamp(
+            torque_per_wheel, -self.config.torque_limit, self.config.torque_limit
+        )
         M_net = torque_per_wheel.sum(dim=1).squeeze(1)  # (B, 3)
         # dot(omega) = inv(I) @ (M - omega x (I @ omega))
         Iw = (I_world @ state.omega.unsqueeze(-1)).squeeze(-1)
