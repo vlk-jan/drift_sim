@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Union, Optional
+from typing import Union
 
 import torch
 import torch.nn.functional as F
@@ -53,7 +53,7 @@ class DPhysicsEngine(torch.nn.Module):
             [0.0, 0.0, -self.robot_model.mass * self.config.g],
             device=self.device,
             requires_grad=False,
-        )
+        ).unsqueeze(0)
         # Precompute relative wheel points
         self.register_buffer(
             "_wheel_pos_rel", self._precompute_wheel_points(n_points=16)
@@ -124,16 +124,23 @@ class DPhysicsEngine(torch.nn.Module):
             wheel_points, world_config
         )
 
+        # Interpret wheel_omega as scalars around Y-axis (Robot Frame)
+        # (B, 3) -> (B, 3, 3) vectors [0, w, 0]
+        zeros = torch.zeros_like(state.wheel_omega)
+        omega_local = torch.stack([zeros, state.wheel_omega, zeros], dim=-1)
+        # Rotate to World Frame
+        omega_world = (R.unsqueeze(1) @ omega_local.unsqueeze(-1)).squeeze(-1)
+
         # v = v_center + ω x (r_contact - r_center)
         # Squeeze contact_points from (B, 3, 1, 3) to (B, 3, 3)
         vels_wheel_contact = state.xd.unsqueeze(1) + torch.linalg.cross(
-            state.wheel_omega.unsqueeze(1).expand(-1, 3, -1),
+            omega_world,
             wheel_centers_world - contact_points.squeeze(2),
-        )
+        ).unsqueeze(2)
 
         # F_springs will be (B, 3, 1, 3)
         F_springs = self.calculate_spring_force(
-            dh_points, vels_wheel_contact.unsqueeze(2), normals, world_config
+            dh_points, vels_wheel_contact, normals, world_config
         )
 
         # Friction
@@ -142,23 +149,11 @@ class DPhysicsEngine(torch.nn.Module):
         # Normal Force Magnitude: Project Spring Force onto Surface Normal
         # F_springs: (B, W, 1, 3). normals: (B, W, 1, 3).
         norms_spring = (F_springs * normals).sum(dim=-1, keepdim=True)  # (B, W, 1, 1)
-        F_N = norms_spring.clamp(min=1e-9)
+        F_N = norms_spring.clamp_min(1e-9)
 
-        v_gnd = self._T_onto_plane(-state.xd.unsqueeze(1), normals.squeeze(2))
-
-        # F_fric = mu * F_N * sigmoid(v_rel)
-        Fs_fric = (
-            fric_coeffs.unsqueeze(-1)
-            * F_N
-            * (
-                torch.sigmoid(
-                    (vels_wheel_contact.unsqueeze(2) - v_gnd.unsqueeze(2))
-                    * self.config.k
-                )
-                - 0.5
-            )
-            * 2
-        )
+        # F_fric = mu * F_N * tanh(v_rel)
+        # vels_wheel_contact is absolute velocity of contact point (ground is static)
+        Fs_fric = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(vels_wheel_contact)
 
         # Only apply friction if in contact (F_spring > 0)
         wheels_in_contact = (norms_spring > 0).float()
@@ -169,7 +164,7 @@ class DPhysicsEngine(torch.nn.Module):
 
         # Total Force (World Frame)
         # F_grav: (B, 3)
-        F_grav_batch = self._F_g.unsqueeze(0).expand(self.config.num_robots, -1)
+        F_grav_batch = self._F_g.expand(self.config.num_robots, -1)
         F_net_world = F_grav_batch + F_net_wheels.sum(dim=1).squeeze(1)
 
         # Acceleration
