@@ -4,9 +4,10 @@ import torch
 
 from simulator.numerical import (
     integrate_quaternion,
-    quat_to_rotmat,
     interpolate_grid,
     interpolate_surface_normals,
+    interpolate_surface_normals_multi,
+    quat_to_rotmat,
 )
 from simulator.utils import (
     PhysicsEngineConfig,
@@ -77,6 +78,100 @@ class DPhysicsEngine(torch.nn.Module):
         """Transform vector onto a plane given by normal vector (i.e. via rejection on it)."""
         return vec - self._T_onto_normal(vec, normal_vec)
 
+    def _find_contact_points(
+        self,
+        robot_points: torch.Tensor,
+        world_config: WorldConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns the deepest contact points for each wheel and the associated normals.
+
+        Args:
+            robot_points: (B, W, P, 3) positions of wheel sample points
+            world_config: World configuration containing terrain grids
+
+        Returns:
+            points:    (B, W, 1, 3) deepest contact point per wheel
+            dh_points: (B, W, 1, 1) penetration depth at that point
+            normals:   (B, W, 1, 3) surface normal at that point
+        """
+        B, W, _, _ = robot_points.shape
+
+        # --- Interpolate terrain heights for all wheel points ---
+        z_points = interpolate_grid(
+            world_config.z_grid, robot_points[..., :2], world_config.max_coord
+        )  # (B, W, P, 1)
+
+        # --- Compute normals per wheel sample point ---
+        normals = interpolate_surface_normals_multi(
+            world_config.normals, robot_points[..., :2], world_config.max_coord
+        )  # (B, W, P, 3)
+
+        # --- Compute penetration depth along normal z ---
+        dh = (robot_points[..., 2:3] - z_points) * normals[..., 2:3]  # (B, W, P, 1)
+
+        # --- Find deepest point per wheel ---
+        deepest_idx = torch.argmin(dh, dim=2, keepdim=True)  # (B, W, 1)
+
+        # --- Gather deepest point, depth, and normal ---
+        idx_points = deepest_idx.expand(B, W, 1, 3)
+        points = robot_points.gather(dim=2, index=idx_points)  # (B, W, 1, 3)
+        normals = normals.gather(dim=2, index=idx_points)  # (B, W, 1, 3)
+
+        idx_dh = deepest_idx.expand(B, W, 1, 1)
+        dh_points = dh.gather(dim=2, index=idx_dh)  # (B, W, 1, 1)
+
+        return points, dh_points, normals
+
+    def _calculate_spring_force(
+        self,
+        dh_points: torch.Tensor,
+        xd_points: torch.Tensor,
+        normals: torch.Tensor,
+        world_config: WorldConfig,
+    ) -> torch.Tensor:
+        """
+        Calculate the spring force acting on the robot points.
+        """
+        in_contact = (dh_points < 0).float()  # shape (B, W, P, 1)
+
+        num_contacts = in_contact.sum(dim=1, keepdim=True).clamp_min(1)
+
+        k = world_config.k_stiffness
+        b = (
+            self.config.damping_alpha
+            * 2
+            * (self.robot_model.mass * k / num_contacts) ** 0.5
+        )
+
+        # normal component of the velocity
+        xd_points_n = (xd_points * normals).sum(dim=-1, keepdim=True)
+
+        # F_spring = -k * dh - b * v_n, multiply by -n to get the force vector
+        # add unilateral constraint - to ensure the ground can only push, never pull.
+        F_spring = torch.relu(-(k * dh_points + b * xd_points_n)) * normals
+
+        # shape (B, 3, 3), the spring force acting on the robot points
+        return F_spring * in_contact / num_contacts
+
+    def _find_frict_coeffs_at_contact(
+        self, contact_points: torch.Tensor, world_config: WorldConfig
+    ) -> torch.Tensor:
+        if isinstance(world_config.k_friction, torch.Tensor):
+            fric_coeffs = interpolate_grid(
+                world_config.k_friction,
+                contact_points[..., :2],
+                world_config.max_coord,
+            ).squeeze(-1)
+        else:
+            k = world_config.k_friction
+            B, W = contact_points.shape[:2]
+            fric_coeffs = torch.full(
+                (B, W, 1), k, device=self.device, dtype=contact_points.dtype
+            )
+
+        return fric_coeffs
+
     def forward(
         self,
         state: PhysicsState,
@@ -107,7 +202,7 @@ class DPhysicsEngine(torch.nn.Module):
         )
 
         # INFO: if contact points do not touch, they return the closest one
-        contact_points, dh_points, normals = self.find_contact_points(
+        contact_points, dh_points, normals = self._find_contact_points(
             wheel_points, world_config
         )
 
@@ -126,12 +221,12 @@ class DPhysicsEngine(torch.nn.Module):
         ).unsqueeze(2)
 
         # F_springs will be (B, 3, 1, 3)
-        F_springs = self.calculate_spring_force(
+        F_springs = self._calculate_spring_force(
             dh_points, vels_wheel_contact, normals, world_config
         )
 
         # Friction
-        fric_coeffs = self.find_frict_coeffs_at_contact(contact_points, world_config)
+        fric_coeffs = self._find_frict_coeffs_at_contact(contact_points, world_config)
 
         # Normal Force Magnitude: Project Spring Force onto Surface Normal
         # F_springs: (B, W, 1, 3). normals: (B, W, 1, 3).
@@ -208,99 +303,8 @@ class DPhysicsEngine(torch.nn.Module):
             device=state.device,
         )
 
-    def find_contact_points(
-        self,
-        robot_points: torch.Tensor,
-        world_config: WorldConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Returns the deepest contact points for each wheel and the associated normals.
-
-        Args:
-            robot_points: (B, W, P, 3) positions of wheel sample points
-            world_config: World configuration containing terrain grids
-
-        Returns:
-            points:    (B, W, 1, 3) deepest contact point per wheel
-            dh_points: (B, W, 1, 1) penetration depth at that point
-            normals:   (B, W, 1, 3) surface normal at that point
-        """
-        B, W, _, _ = robot_points.shape
-
-        # --- Interpolate terrain heights for all wheel points ---
-        z_points = interpolate_grid(
-            world_config.z_grid, robot_points[..., :2], world_config.max_coord
-        )  # (B, W, P, 1)
-
-        # --- Compute normals per wheel sample point ---
-        normals = interpolate_surface_normals_multi(
-            world_config.normals, robot_points[..., :2], world_config.max_coord
-        )  # (B, W, P, 3)
-
-        # --- Compute penetration depth along normal z ---
-        dh = (robot_points[..., 2:3] - z_points) * normals[..., 2:3]  # (B, W, P, 1)
-
-        # --- Find deepest point per wheel ---
-        deepest_idx = torch.argmin(dh, dim=2, keepdim=True)  # (B, W, 1)
-
-        # --- Gather deepest point, depth, and normal ---
-        idx_points = deepest_idx.expand(B, W, 1, 3)
-        points = robot_points.gather(dim=2, index=idx_points)  # (B, W, 1, 3)
-        normals = normals.gather(dim=2, index=idx_points)  # (B, W, 1, 3)
-
-        idx_dh = deepest_idx.expand(B, W, 1, 1)
-        dh_points = dh.gather(dim=2, index=idx_dh)  # (B, W, 1, 1)
-
-        return points, dh_points, normals
-
-    def calculate_spring_force(
-        self,
-        dh_points: torch.Tensor,
-        xd_points: torch.Tensor,
-        normals: torch.Tensor,
-        world_config: WorldConfig,
-    ) -> torch.Tensor:
-        """
-        Calculate the spring force acting on the robot points.
-        """
-        in_contact = (dh_points < 0).float()  # shape (B, W, P, 1)
-
-        num_contacts = in_contact.sum(dim=1, keepdim=True).clamp_min(1)
-
-        k = world_config.k_stiffness
-        b = (
-            self.config.damping_alpha
-            * 2
-            * (self.robot_model.mass * k / num_contacts) ** 0.5
-        )
-
-        # normal component of the velocity
-        xd_points_n = (xd_points * normals).sum(dim=-1, keepdim=True)
-
-        # F_spring = -k * dh - b * v_n, multiply by -n to get the force vector
-        # add unilateral constraint - to ensure the ground can only push, never pull.
-        F_spring = torch.relu(-(k * dh_points + b * xd_points_n)) * normals
-
-        # shape (B, 3, 3), the spring force acting on the robot points
-        return F_spring * in_contact / num_contacts
-
-    def find_frict_coeffs_at_contact(
-        self, contact_points: torch.Tensor, world_config: WorldConfig
-    ) -> torch.Tensor:
-        if isinstance(world_config.k_friction, torch.Tensor):
-            fric_coeffs = interpolate_grid(
-                world_config.k_friction,
-                contact_points[..., :2],
-                world_config.max_coord,
-            ).squeeze(-1)
-        else:
-            k = world_config.k_friction
-            B, W = contact_points.shape[:2]
-            fric_coeffs = torch.full(
-                (B, W, 1), k, device=self.device, dtype=contact_points.dtype
-            )
-
-        return fric_coeffs
+    def get_dt(self) -> float:
+        return self.config.dt
 
 
 # TODO: check thoroughly
@@ -368,86 +372,3 @@ def find_init_rob_position(
     q = q.unsqueeze(0).to(device)
 
     return x_init, q
-
-
-def get_transformations_from_height_map(
-    world_config: WorldConfig,
-    phys_engine_cfg: PhysicsEngineConfig,
-    robot_model: RobotModelConfig,
-    vel_ctrl: list[VelocitiesStamped],
-    device,
-) -> list[TransformStamped]:
-    """Compute a list of SO3 pairs for the given wheel velocities
-
-    Parameters
-    ----------
-        TODO:
-
-    Returns:
-    -------
-    list[TransformStamped]
-        List of transformations between steps with timestamp.
-    """
-
-    engine = DPhysicsEngine(phys_engine_cfg, robot_model, device)
-    state = PhysicsState.dummy(batch_size=1, device=device)
-    state.x, state.q = find_init_rob_position(world_config, robot_model, device)
-
-    start_time = vel_ctrl[0].timestamp
-    stop_time = vel_ctrl[-1].timestamp
-    t = start_time
-
-    transformations = []
-    prev_x = state.x.clone()
-    prev_q = state.q.clone()
-
-    curr_idx = 0
-
-    while t <= stop_time:
-        while curr_idx + 1 < len(vel_ctrl) and t >= vel_ctrl[curr_idx + 1].timestamp:
-            curr_idx += 1
-
-        # Linear Interpolation of Velocity
-        if curr_idx + 1 < len(vel_ctrl):
-            t0 = vel_ctrl[curr_idx].timestamp
-            t1 = vel_ctrl[curr_idx + 1].timestamp
-            v0 = vel_ctrl[curr_idx].velocities
-            v1 = vel_ctrl[curr_idx + 1].velocities
-
-            # Avoid division by zero
-            dt = max(t1 - t0, 1e-6)
-            ratio = (t - t0) / dt
-
-            curr_velocities = v0 + (v1 - v0) * ratio
-            curr_acceleration = (v1 - v0) / dt
-        else:
-            # End of trajectory, hold last velocity, zero acceleration
-            curr_velocities = vel_ctrl[curr_idx].velocities
-            curr_acceleration = torch.zeros_like(curr_velocities)
-
-        # Update state wheel velocities to match interpolated input
-        state.wheel_omega = curr_velocities.unsqueeze(0)
-
-        # Forward with acceleration control
-        dstate = engine.forward(state, curr_acceleration, world_config)
-        state = engine.update_state(state, dstate)
-
-        rel_trans = state.x - prev_x
-
-        R_prev = quat_to_rotmat(prev_q)
-        R_curr = quat_to_rotmat(state.q)
-        R_rel = R_prev.transpose(-1, -2) @ R_curr
-
-        transformations.append(
-            TransformStamped(
-                timestamp=t,
-                transl_vec=rel_trans,
-                rot_mat=R_rel,
-            )
-        )
-
-        prev_x = state.x.clone()
-        prev_q = state.q.clone()
-        t += phys_engine_cfg.dt
-
-    return transformations
