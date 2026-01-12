@@ -9,13 +9,10 @@ from simulator.numerical import unit_quaternion
 @dataclass
 class RobotModelConfig:
     mass: float = 0
-    torque_min: float = -1e9
-    torque_max: float = -1e9
-    # vector from the center of the triangle connecting the wheel centers to COG
     cog: torch.Tensor = torch.tensor([0, 0, 0])
     wheel_radii: torch.Tensor = torch.tensor([1, 1, 1])
     wheel_centers: torch.Tensor = torch.tensor(((1, -1, 0), (1, 1, 0), (-1, 0, 0)))
-    wheel_inertias: torch.Tensor = torch.tensor(())  # TODO:
+    wheel_inertias: torch.Tensor = torch.tensor(())
     inertia_tensor: torch.Tensor = torch.eye(3)
 
 

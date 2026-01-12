@@ -41,8 +41,9 @@ class Simulator(torch.nn.Module):
         self.device = device
 
         self.engine = DPhysicsEngine(engine_config, robot_model, device)
+        self.engine.eval()
 
-    def get_transformations_from_properties(
+    def predict_trajectory(
         self,
         properties: dict,
         vel_ctrl: torch.Tensor,
