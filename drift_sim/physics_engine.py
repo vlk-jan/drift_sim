@@ -235,7 +235,10 @@ class DPhysicsEngine(torch.nn.Module):
 
         # F_fric = mu * F_N * tanh(v_rel)
         # vels_wheel_contact is absolute velocity of contact point (ground is static)
-        Fs_fric = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(vels_wheel_contact)
+        # Refined friction model: direction based on velocity vector, magnitude based on speed
+        v_mag = torch.norm(vels_wheel_contact, dim=-1, keepdim=True)
+        v_dir = vels_wheel_contact / (v_mag + 1e-6)
+        Fs_fric = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag) * v_dir
 
         # Only apply friction if in contact (F_spring > 0)
         wheels_in_contact = (norms_spring > 0).float()
