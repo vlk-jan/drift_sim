@@ -49,15 +49,26 @@ class Simulator(torch.nn.Module):
         vel_ctrl: torch.Tensor,
         vel_ts: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute a list of SO3 pairs for the given wheel velocities
+        """Compute a list of SO3 transformation matrices for the given wheel velocities.
 
         Parameters
         ----------
-            TODO:
+        properties : dict
+            A dictionary containing terrain properties:
+            - "geom": torch.Tensor of shape (B, H, W) representing heightmap.
+            - "friction": torch.Tensor of shape (B, H, W) or scalar representing friction coefficients.
+        vel_ctrl : torch.Tensor
+            Control inputs for wheel velocities. Shape (Steps, B, 3) where 3 is the number of wheels.
+        vel_ts : torch.Tensor
+            Timestamps associated with the control inputs. Shape (Steps,).
 
         Returns:
         -------
-            TODO:
+        transformations : torch.Tensor
+            A stack of SE(3) transformation matrices representing relative robot motion.
+            Shape (SimSteps, B, 4, 4).
+        timestamps : torch.Tensor
+            The timestamps for each simulation step. Shape (SimSteps,).
         """
 
         world_config = WorldConfig(
@@ -117,7 +128,11 @@ class Simulator(torch.nn.Module):
             R_curr = quat_to_rotmat(state.q)
             R_rel = R_prev.transpose(-1, -2) @ R_curr
 
-            T = torch.eye(4, device=self.device).unsqueeze(0).repeat(self.batch_size, 1, 1)
+            T = (
+                torch.eye(4, device=self.device)
+                .unsqueeze(0)
+                .repeat(self.batch_size, 1, 1)
+            )
             T[:, :3, :3] = R_rel
             T[:, :3, 3] = rel_trans
 
