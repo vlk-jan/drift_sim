@@ -7,6 +7,19 @@ from simulator.numerical import unit_quaternion
 
 
 @dataclass
+class VelocitiesStamped:
+    timestamp: float  # UNIX timestamp
+    velocities: torch.Tensor  # [float, float, float]
+
+
+@dataclass
+class TransformStamped:
+    timestamp: float  # UNIX timestamp
+    transl_vec: torch.Tensor
+    rot_mat: torch.Tensor
+
+
+@dataclass
 class RobotModelConfig:
     mass: float = 0
     torque_min: float = -1e9

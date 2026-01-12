@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Union
 
 import torch
@@ -16,19 +15,6 @@ from simulator.utils import (
     RobotModelConfig,
 )
 from simulator.world_config import WorldConfig
-
-
-@dataclass
-class VelocitiesStamped:
-    timestamp: float  # UNIX timestamp
-    velocities: torch.Tensor  # [float, float, float]
-
-
-@dataclass
-class TransformStamped:
-    timestamp: float  # UNIX timestamp
-    transl_vec: torch.Tensor
-    rot_mat: torch.Tensor
 
 
 ###############################################################################
