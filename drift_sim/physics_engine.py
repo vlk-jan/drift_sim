@@ -309,28 +309,31 @@ class DPhysicsEngine(torch.nn.Module):
 
 # TODO: check thoroughly
 def find_init_rob_position(
-    world_config: WorldConfig, robot_model: RobotModelConfig, device
+    world_config: WorldConfig,
+    robot_model: RobotModelConfig,
+    batch_size: int,
+    device: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Find the initial position (x) and orientation (q) of the robot so that it rests
     on the terrain at (0,0,unknown height).
 
     Returns:
-        x_init: (3,)  world position
-        q_init: (4,)  unit quaternion [w, x, y, z]
+        x_init: (B, 3)  world position
+        q_init: (B, 4)  unit quaternion [w, x, y, z]
     """
 
     # --- 1. Terrain height + normal at (0, 0) ---
-    xy = torch.tensor([[[0.0, 0.0]]], device=device)  # shape (B=1, N=1, 2)
-    z_ground = interpolate_grid(world_config.z_grid, xy, world_config.max_coord)[
-        0, 0, 0, 0
-    ]
+    xy = torch.zeros((batch_size, 1, 2), device=device)  # shape (B, N=1, 2)
+    z_ground = interpolate_grid(
+        world_config.z_grid, xy, world_config.max_coord
+    ).reshape(batch_size, 1)
     n_ground = interpolate_surface_normals(
         world_config.normals, xy, world_config.max_coord
-    )[0, 0]
+    ).reshape(batch_size, 3)
 
     # Ensure the normal is normalized
-    n_ground = n_ground / torch.norm(n_ground)
+    n_ground = n_ground / torch.norm(n_ground, dim=1, keepdim=True)
 
     # --- 2. Compute reference offset for wheels / CoM ---
     # Assume wheel_radii is iterable or tensor-like
@@ -338,37 +341,54 @@ def find_init_rob_position(
         robot_model.wheel_radii, device=device, dtype=torch.float32
     )
     z_offset = wheel_radii.mean()
-
     z_init = z_ground + z_offset
 
     # --- 3. Compute orientation aligning robot up-axis with terrain normal ---
-    z_body = torch.tensor([0.0, 0.0, 1.0], device=device)
+    z_body = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
 
     # Compute axis–angle rotation: rotate z_body → n_ground
     v = torch.linalg.cross(z_body, n_ground)
-    s = torch.norm(v)
-    c = torch.dot(z_body, n_ground)
+    s = torch.norm(v, dim=1, keepdim=True)
+    c = (z_body * n_ground).sum(dim=1, keepdim=True)
 
-    if s < 1e-8:
-        # The vectors are parallel — robot is either upright or upside-down
-        if c > 0:  # already aligned
-            q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
-        else:  # 180-degree flip around any horizontal axis
-            q = torch.tensor([0.0, 1.0, 0.0, 0.0], device=device)
-    else:
-        axis = v / s
-        angle = torch.atan2(s, c)
+    # --- Rotation Calculation (Axis-Angle to Quaternion) ---
+    # angle = atan2(norm(cross), dot)
+    angle = torch.atan2(s, c)
 
-        # Convert axis–angle to quaternion
-        half = angle * 0.5
-        qw = torch.cos(half)
-        qx, qy, qz = axis * torch.sin(half)
+    # Compute rotation axis.
+    # Add epsilon to 's' to avoid division by zero when vectors are parallel (s~0).
+    # We will fix the parallel case explicitly with torch.where later.
+    axis = v / (s + 1e-8)
 
-        q = torch.stack([qw, qx, qy, qz])
-        q = q / torch.norm(q)
+    # Half angle formula for quaternion
+    half = angle * 0.5
+    qw = torch.cos(half)
+    qxyz = axis * torch.sin(half)  # (B, 3)
+
+    # Stack to (B, 4): [w, x, y, z]
+    q_nominal = torch.cat([qw, qxyz], dim=1)
+    q_nominal = q_nominal / torch.norm(q_nominal, dim=1, keepdim=True)
+
+    # --- Handle Singularities (Perfectly Upright or Upside Down) ---
+    # If s is very small, the cross product was zero (parallel vectors).
+    # The axis calculation above might be garbage, so we use a mask.
+    is_parallel = s.squeeze(-1) < 1e-7
+
+    # Case A: Already aligned (c > 0) -> Identity Quaternion
+    q_identity = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(batch_size, 4)
+
+    # Case B: Upside down (c < 0) -> 180 deg flip around X
+    q_flip = torch.tensor([0.0, 1.0, 0.0, 0.0], device=device).expand(batch_size, 4)
+
+    # Select correct quaternion based on alignment
+    # Note: If c > 0 (upright), we pick Identity. If c < 0 (upside down), we pick Flip.
+    q_parallel = torch.where(c.expand(batch_size, 4) > 0, q_identity, q_flip)
+
+    # Final selection: Use q_parallel if s is small, else q_nominal
+    q_final = torch.where(is_parallel.unsqueeze(-1), q_parallel, q_nominal)
 
     # --- 4. Compose initial position ---
-    x_init = torch.tensor([0.0, 0.0, z_init], device=device).unsqueeze(0)
-    q = q.unsqueeze(0).to(device)
+    x_init = torch.zeros((batch_size, 3), device=device)
+    x_init[:, 2] = z_init.squeeze(-1)
 
-    return x_init, q
+    return x_init, q_final
