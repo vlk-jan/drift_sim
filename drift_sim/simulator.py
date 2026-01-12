@@ -68,7 +68,7 @@ class Simulator(torch.nn.Module):
         )
         state = PhysicsState.dummy(batch_size=self.batch_size, device=self.device)
         state.x, state.q = find_init_rob_position(
-            world_config, self.robot_model, self.device
+            world_config, self.robot_model, self.batch_size, self.device
         )
 
         start_time = vel_ts[0]
@@ -105,7 +105,7 @@ class Simulator(torch.nn.Module):
                 curr_acceleration = torch.zeros_like(curr_velocities)
 
             # Update state wheel velocities to match interpolated input
-            state.wheel_omega = curr_velocities.unsqueeze(0)
+            state.wheel_omega = curr_velocities
 
             # Forward with acceleration control
             dstate = self.engine.forward(state, curr_acceleration, world_config)
@@ -117,9 +117,9 @@ class Simulator(torch.nn.Module):
             R_curr = quat_to_rotmat(state.q)
             R_rel = R_prev.transpose(-1, -2) @ R_curr
 
-            T = torch.eye(4, device=self.device)
-            T[:3, :3] = R_rel
-            T[:3, 3] = rel_trans
+            T = torch.eye(4, device=self.device).unsqueeze(0).repeat(self.batch_size, 1, 1)
+            T[:, :3, :3] = R_rel
+            T[:, :3, 3] = rel_trans
 
             transformations.append(T)
             timestamps.append(ts)

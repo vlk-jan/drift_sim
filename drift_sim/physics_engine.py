@@ -215,7 +215,7 @@ class DPhysicsEngine(torch.nn.Module):
 
         # v = v_center + ω x (r_contact - r_center)
         # Squeeze contact_points from (B, 3, 1, 3) to (B, 3, 3)
-        vels_wheel_contact = state.xd.unsqueeze(1) + torch.linalg.cross(
+        vels_wheel_contact = state.xd.unsqueeze(1).unsqueeze(1) + torch.linalg.cross(
             omega_world,
             contact_points.squeeze(2) - wheel_centers_world,
         ).unsqueeze(2)
