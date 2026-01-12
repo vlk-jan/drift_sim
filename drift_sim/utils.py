@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 from tensordict import TensorClass
@@ -33,9 +34,9 @@ class PhysicsEngineConfig:
     num_robots: int = 1
     dt: float = 1e-2
     g: float = 9.81
-    torque_limit: float = 200.0  # TODO:
+    torque_limit: float = 200.0
     damping_alpha: float = 1.0
-    soft_contact_sigma: float = 0.01  # TODO:
+    soft_contact_sigma: Optional[float] = None  # 0.01
 
 
 class PhysicsState(TensorClass):

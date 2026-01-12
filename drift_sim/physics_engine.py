@@ -149,7 +149,18 @@ class DPhysicsEngine(torch.nn.Module):
 
         # F_spring = -k * dh - b * v_n, multiply by -n to get the force vector
         # add unilateral constraint - to ensure the ground can only push, never pull.
-        F_spring = torch.relu(-(k * dh_points + b * xd_points_n)) * normals
+        force_magnitude = -(k * dh_points + b * xd_points_n)
+
+        if self.config.soft_contact_sigma is not None:
+            # Soft contact: Smooth approximation of ReLU using Softplus
+            F_spring_mag = torch.nn.functional.softplus(
+                force_magnitude, beta=1.0 / self.config.soft_contact_sigma
+            )
+        else:
+            # Hard contact: ReLU
+            F_spring_mag = torch.relu(force_magnitude)
+
+        F_spring = F_spring_mag * normals
 
         # shape (B, 3, 3), the spring force acting on the robot points
         return F_spring * in_contact / num_contacts
@@ -310,7 +321,6 @@ class DPhysicsEngine(torch.nn.Module):
         return self.config.dt
 
 
-# TODO: check thoroughly
 def find_init_rob_position(
     world_config: WorldConfig,
     robot_model: RobotModelConfig,
