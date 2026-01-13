@@ -18,13 +18,24 @@ class Simulator(torch.nn.Module):
 
         if robot == "helhest":
             robot_model = RobotModelConfig(
-                mass=90.0,
-                wheel_radii=torch.tensor([0.5, 0.5, 0.5]),
+                mass=93.8,
+                cog=torch.tensor([0.145, 0.009, 0.0]),
+                wheel_radii=torch.tensor([0.355, 0.355, 0.355]),
                 wheel_centers=torch.tensor(
-                    [[0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [-0.5, 0.0, 0.0]]
+                    [[0.365, 0.365, 0.0], [0.365, -0.365, 0.0], [-0.365, 0.0, 0.0]]
+                ),
+                wheel_inertias=torch.tensor([0.2, 0.2, 0.2]),
+                inertia_tensor=torch.tensor([[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]])
+            )
+        elif robot == "marv":
+            robot_model = RobotModelConfig(
+                mass=67.8,
+                wheel_radii=torch.tensor([0.12, 0.12, 0.12]),
+                wheel_centers=torch.tensor(
+                    [[0.245, 0.2025, 0.0], [0.245, -0.2025, 0.0], [-0.245, 0.0, 0.0]]
                 ),
                 wheel_inertias=torch.tensor([0.1, 0.1, 0.1]),
-                inertia_tensor=torch.diag(torch.tensor([10.0, 10.0, 20.0])),
+                inertia_tensor=torch.diag(torch.tensor([15.0, 15.0, 30.0])),
             )
         else:
             raise ValueError(f"Unsupported robot: {robot}")
@@ -49,7 +60,8 @@ class Simulator(torch.nn.Module):
         vel_ctrl: torch.Tensor,
         vel_ts: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute a list of SO3 transformation matrices for the given wheel velocities.
+        """
+        Compute a list of SO3 transformation matrices for the given wheel velocities.
 
         Parameters
         ----------

@@ -36,7 +36,7 @@ class PhysicsEngineConfig:
     g: float = 9.81
     torque_limit: float = 200.0
     damping_alpha: float = 1.0
-    soft_contact_sigma: Optional[float] = None  # 0.01
+    soft_contact_sigma: Optional[float] = None  # None or 0.01
 
 
 class PhysicsState(TensorClass):
