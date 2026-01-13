@@ -82,9 +82,9 @@ class Simulator(torch.nn.Module):
             world_config, self.robot_model, self.batch_size, self.device
         )
 
-        start_time = vel_ts[0]
-        stop_time = vel_ts[-1]
-        ts = start_time
+        start_time = vel_ts[0].item()
+        stop_time = vel_ts[-1].item()
+        ts = float(start_time)
 
         transformations = []
         timestamps = []
