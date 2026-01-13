@@ -53,7 +53,7 @@ class WorldConfig(BaseConfig):
         z_grid_grad = self._compute_heightmap_gradients(self.z_grid)  # (B, 2, D, D)
         ones = torch.ones_like(z_grid_grad[:, 0]).unsqueeze(1)
         self.normals = torch.cat((-z_grid_grad, ones), dim=1)
-        self.normals /= torch.linalg.norm(self.normals, dim=1, keepdim=True)
+        self.normals = self.normals / torch.linalg.norm(self.normals, dim=1, keepdim=True)
 
     def _compute_heightmap_gradients(self, z_grid: torch.Tensor) -> torch.Tensor:
         """
