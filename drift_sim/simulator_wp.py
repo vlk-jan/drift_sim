@@ -2,7 +2,7 @@ import torch
 
 from simulator.engine_wp import WarpStaticEngine
 from simulator.numerical import quat_to_rotmat
-from simulator.engine import find_init_rob_position
+from simulator.utils import find_init_rob_position
 from simulator.utils import PhysicsEngineConfig
 from simulator.utils import PhysicsState
 from simulator.utils import RobotModelConfig

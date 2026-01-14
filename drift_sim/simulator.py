@@ -1,8 +1,9 @@
 import torch
 
 from simulator.numerical import quat_to_rotmat
-from simulator.engine import DPhysicsEngine, find_init_rob_position
+from simulator.engine import DPhysicsEngine
 from simulator.utils import (
+    find_init_rob_position,
     PhysicsEngineConfig,
     RobotModelConfig,
     PhysicsState,
