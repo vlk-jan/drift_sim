@@ -57,6 +57,22 @@ class Simulator(torch.nn.Module):
     def predict_trajectory(self, properties, vel_ctrl, vel_ts):
         """
         Calculates trajectory using the Fused Warp Kernel with Velocity Control.
+
+        Parameters
+        ----------
+        properties : dict
+            Terrain properties (geom, friction).
+        vel_ctrl : torch.Tensor
+            Control inputs for wheel velocities. Shape (B, Steps, 3).
+        vel_ts : torch.Tensor
+            Timestamps associated with the control inputs. Shape (B, Steps).
+
+        Returns:
+        -------
+        transformations : torch.Tensor
+            Relative robot motion. Shape (B, SimSteps, 4, 4).
+        timestamps : torch.Tensor
+            Timestamps for each simulation step. Shape (B, SimSteps).
         """
         # 1. Setup World
         world_config = WorldConfig(
@@ -73,27 +89,34 @@ class Simulator(torch.nn.Module):
         )
 
         # 3. Interpolate Controls
+        ref_ts = vel_ts[0]  # (Steps,)
+
+        # Permute vel_ctrl to (Steps, B, 3) for efficient indexing
+        vel_ctrl_permuted = vel_ctrl.permute(1, 0, 2)
+
         sim_dt = self.engine_config.dt
-        total_time = vel_ts[-1] - vel_ts[0]
+        total_time = ref_ts[-1] - ref_ts[0]
         num_steps = int(total_time / sim_dt)
 
         query_times = torch.linspace(
-            vel_ts[0], vel_ts[-1], num_steps, device=self.device
+            ref_ts[0], ref_ts[-1], num_steps, device=self.device
         )
 
-        idx = torch.searchsorted(vel_ts, query_times, right=True) - 1
-        idx = idx.clamp(0, len(vel_ts) - 2)
+        idx = torch.searchsorted(ref_ts, query_times, right=True) - 1
+        idx = idx.clamp(0, len(ref_ts) - 2)
 
-        t0 = vel_ts[idx]
-        t1 = vel_ts[idx + 1]
-        v0 = vel_ctrl[idx]
-        v1 = vel_ctrl[idx + 1]
+        t0 = ref_ts[idx]
+        t1 = ref_ts[idx + 1]
+
+        # v0, v1 will be (SimSteps, B, 3)
+        v0 = vel_ctrl_permuted[idx]
+        v1 = vel_ctrl_permuted[idx + 1]
 
         alpha = ((query_times - t0) / (t1 - t0)).unsqueeze(-1).unsqueeze(-1)
         alpha = torch.nan_to_num(alpha, 0.0)
 
         # Dense VELOCITIES (Match PyTorch kinematic driving)
-        dense_controls = v0 + (v1 - v0) * alpha
+        dense_controls = v0 + (v1 - v0) * alpha  # (SimSteps, B, 3)
 
         # 4. RUN SUPER KERNEL
         traj_x, traj_q = self.fast_engine.run_trajectory(
@@ -118,6 +141,7 @@ class Simulator(torch.nn.Module):
         x_curr = all_x[1:]
         rel_trans = x_curr - x_prev
 
+        # T is initially (SimSteps, B, 4, 4)
         T = (
             torch.eye(4, device=self.device)
             .view(1, 1, 4, 4)
@@ -126,4 +150,10 @@ class Simulator(torch.nn.Module):
         T[:, :, :3, :3] = R_rel
         T[:, :, :3, 3] = rel_trans
 
-        return T, query_times
+        # Permute to (B, SimSteps, 4, 4)
+        T = T.permute(1, 0, 2, 3)
+
+        # Expand timestamps to (B, SimSteps)
+        query_times_batch = query_times.unsqueeze(0).expand(self.batch_size, -1)
+
+        return T, query_times_batch
