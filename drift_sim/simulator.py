@@ -18,13 +18,26 @@ class Simulator(torch.nn.Module):
 
         if robot == "helhest":
             robot_model = RobotModelConfig(
-                mass=90.0,
-                wheel_radii=torch.tensor([0.5, 0.5, 0.5]),
+                mass=93.8,
+                cog=torch.tensor([0.145, 0.009, 0.0]),
+                wheel_radii=torch.tensor([0.355, 0.355, 0.355]),
                 wheel_centers=torch.tensor(
-                    [[0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [-0.5, 0.0, 0.0]]
+                    [[0.365, 0.365, 0.0], [0.365, -0.365, 0.0], [-0.365, 0.0, 0.0]]
+                ),
+                wheel_inertias=torch.tensor([0.2, 0.2, 0.2]),
+                inertia_tensor=torch.tensor(
+                    [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
+                ),
+            )
+        elif robot == "marv":
+            robot_model = RobotModelConfig(
+                mass=67.8,
+                wheel_radii=torch.tensor([0.12, 0.12, 0.12]),
+                wheel_centers=torch.tensor(
+                    [[0.245, 0.2025, 0.0], [0.245, -0.2025, 0.0], [-0.245, 0.0, 0.0]]
                 ),
                 wheel_inertias=torch.tensor([0.1, 0.1, 0.1]),
-                inertia_tensor=torch.diag(torch.tensor([10.0, 10.0, 20.0])),
+                inertia_tensor=torch.diag(torch.tensor([15.0, 15.0, 30.0])),
             )
         else:
             raise ValueError(f"Unsupported robot: {robot}")
@@ -43,13 +56,80 @@ class Simulator(torch.nn.Module):
         self.engine = DPhysicsEngine(engine_config, robot_model, device)
         self.engine.eval()
 
+    def _prepare_inputs(self, vel_ctrl, vel_ts):
+        """
+        Prepare control inputs for simulation. This may include resampling or interpolation such
+        that each input has the same number of simulation steps and these steps align with the
+        physics engine's time step.
+
+        Parameters
+        ----------
+        vel_ctrl : torch.Tensor
+            Control inputs for wheel velocities. Shape (B, Steps, 3) where 3 is the number of wheels.
+        vel_ts : torch.Tensor
+            Timestamps associated with the control inputs. Shape (B, Steps).
+
+        Returns
+        -------
+        vel_ctrl : torch.Tensor
+            Prepared control inputs for wheel velocities. Shape (B, SimSteps, 3).
+        vel_ts : torch.Tensor
+            Prepared timestamps associated with the control inputs. Shape (B, SimSteps).
+        """
+        if torch.any(vel_ts[-1] != torch.zeros_like(vel_ts[0])):
+            return vel_ctrl, vel_ts
+
+        dt = self.engine.get_dt()
+        new_ctrl = torch.zeros_like(
+            vel_ctrl, dtype=vel_ctrl.dtype, device=vel_ctrl.device
+        )
+        new_ts = torch.zeros_like(vel_ts, dtype=vel_ts.dtype, device=vel_ts.device)
+
+        for idx in range(vel_ts.shape[0]):
+            ts = vel_ts[idx, 0]
+            i = -1
+            end_ts = 0.0
+            while end_ts == 0:
+                end_ts = vel_ts[idx, i]
+                i -= 1
+
+            curr_idx = 0
+            while ts <= end_ts:
+                while (
+                    curr_idx + 1 < vel_ctrl.shape[1] and ts >= vel_ts[idx, curr_idx + 1]
+                ):
+                    curr_idx += 1
+
+                # Linear Interpolation of Velocity
+                if curr_idx + 1 < vel_ctrl.shape[1]:
+                    t0 = vel_ts[idx, curr_idx]
+                    t1 = vel_ts[idx, curr_idx + 1]
+                    v0 = vel_ctrl[idx, curr_idx]
+                    v1 = vel_ctrl[idx, curr_idx + 1]
+
+                    # Avoid division by zero
+                    dt = max(t1 - t0, 1e-6)
+                    ratio = (ts - t0) / dt
+
+                    curr_velocities = v0 + (v1 - v0) * ratio
+                else:
+                    # End of trajectory, hold last velocity, zero acceleration
+                    curr_velocities = vel_ctrl[idx, curr_idx]
+
+                new_ctrl[idx, curr_idx] = curr_velocities
+                new_ts[idx, curr_idx] = ts
+                ts += dt
+
+        return new_ctrl, new_ts
+
     def predict_trajectory(
         self,
         properties: dict,
         vel_ctrl: torch.Tensor,
         vel_ts: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute a list of SO3 transformation matrices for the given wheel velocities.
+        """
+        Compute a list of SO3 transformation matrices for the given wheel velocities.
 
         Parameters
         ----------
@@ -58,17 +138,17 @@ class Simulator(torch.nn.Module):
             - "geom": torch.Tensor of shape (B, H, W) representing heightmap.
             - "friction": torch.Tensor of shape (B, H, W) or scalar representing friction coefficients.
         vel_ctrl : torch.Tensor
-            Control inputs for wheel velocities. Shape (Steps, B, 3) where 3 is the number of wheels.
+            Control inputs for wheel velocities. Shape (B, Steps, 3) where 3 is the number of wheels.
         vel_ts : torch.Tensor
-            Timestamps associated with the control inputs. Shape (Steps,).
+            Timestamps associated with the control inputs. Shape (B, Steps).
 
         Returns:
         -------
         transformations : torch.Tensor
             A stack of SE(3) transformation matrices representing relative robot motion.
-            Shape (SimSteps, B, 4, 4).
+            Shape (B, SimSteps, 4, 4).
         timestamps : torch.Tensor
-            The timestamps for each simulation step. Shape (SimSteps,).
+            The timestamps for each simulation step. Shape (B, SimSteps).
         """
 
         world_config = WorldConfig(
@@ -82,41 +162,23 @@ class Simulator(torch.nn.Module):
             world_config, self.robot_model, self.batch_size, self.device
         )
 
-        start_time = vel_ts[0].item()
-        stop_time = vel_ts[-1].item()
-        ts = float(start_time)
+        vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts)
 
+        ts = vel_ts[:, 0].clone()
+        dt = self.engine.get_dt()
         transformations = []
         timestamps = []
         prev_x = state.x.clone()
         prev_q = state.q.clone()
 
-        curr_idx = 0
-
-        while ts <= stop_time:
-            while curr_idx + 1 < len(vel_ctrl) and ts >= vel_ts[curr_idx + 1]:
-                curr_idx += 1
-
-            # Linear Interpolation of Velocity
-            if curr_idx + 1 < len(vel_ctrl):
-                t0 = vel_ts[curr_idx]
-                t1 = vel_ts[curr_idx + 1]
-                v0 = vel_ctrl[curr_idx]
-                v1 = vel_ctrl[curr_idx + 1]
-
-                # Avoid division by zero
-                dt = max(t1 - t0, 1e-6)
-                ratio = (ts - t0) / dt
-
-                curr_velocities = v0 + (v1 - v0) * ratio
-                curr_acceleration = (v1 - v0) / dt
-            else:
-                # End of trajectory, hold last velocity, zero acceleration
-                curr_velocities = vel_ctrl[curr_idx]
-                curr_acceleration = torch.zeros_like(curr_velocities)
-
+        for idx in range(vel_ts.shape[-1] - 1):
             # Update state wheel velocities to match interpolated input
-            state.wheel_omega = curr_velocities
+            state.wheel_omega = vel_ctrl[:, idx]
+
+            # Compute current acceleration
+            curr_acceleration = (vel_ctrl[:, idx + 1] - vel_ctrl[:, idx]) / (
+                vel_ts[:, idx + 1] - vel_ts[:, idx]
+            ).clamp(min=1e-6).unsqueeze(-1)
 
             # Forward with acceleration control
             dstate = self.engine.forward(state, curr_acceleration, world_config)
@@ -141,6 +203,8 @@ class Simulator(torch.nn.Module):
 
             prev_x = state.x.clone()
             prev_q = state.q.clone()
-            ts += self.engine.get_dt()
+            ts += dt
 
-        return torch.stack(transformations), torch.tensor(timestamps)
+        return torch.stack(transformations).permute(1, 0, 2, 3), torch.stack(
+            timestamps
+        ).permute(1, 0)
