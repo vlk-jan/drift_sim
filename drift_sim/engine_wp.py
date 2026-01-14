@@ -192,7 +192,7 @@ def simulate_trajectory_kernel(
         # ---------------------------------------------------------------------
         # PASS 1: Contact Counting (Global)
         # ---------------------------------------------------------------------
-        total_active_contacts = 0.0
+        total_active_contacts = float(0.0)
 
         for w in range(3):
             w_r = wheel_radii[w]

@@ -4,7 +4,11 @@ from typing import Optional, Union
 import torch
 from tensordict import TensorClass
 
-from simulator.numerical import unit_quaternion
+from simulator.numerical import (
+    unit_quaternion,
+    interpolate_grid,
+    interpolate_surface_normals,
+)
 
 
 # ---------------------------------------------------------------------
@@ -60,8 +64,8 @@ class WorldConfig(BaseConfig):
         self.normals = self.normals / torch.linalg.norm(
             self.normals, dim=1, keepdim=True
         )
-        if not isinstance(self.k_stiffness, torch.Tensor):
-            self.k_stiffness = torch.full_like(self.z_grid, self.k_stiffness)
+        # if not isinstance(self.k_stiffness, torch.Tensor):
+        #     self.k_stiffness = torch.full_like(self.z_grid, self.k_stiffness)
         if not isinstance(self.k_friction, torch.Tensor):
             self.k_friction = torch.full_like(self.z_grid, self.k_friction)
 
