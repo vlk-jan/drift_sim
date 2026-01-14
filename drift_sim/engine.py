@@ -14,8 +14,8 @@ from simulator.utils import (
     PhysicsState,
     PhysicsStateDer,
     RobotModelConfig,
+    WorldConfig,
 )
-from simulator.world_config import WorldConfig
 
 
 ###############################################################################
