@@ -25,7 +25,9 @@ class Simulator(torch.nn.Module):
                     [[0.365, 0.365, 0.0], [0.365, -0.365, 0.0], [-0.365, 0.0, 0.0]]
                 ),
                 wheel_inertias=torch.tensor([0.2, 0.2, 0.2]),
-                inertia_tensor=torch.tensor([[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]])
+                inertia_tensor=torch.tensor(
+                    [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
+                ),
             )
         elif robot == "marv":
             robot_model = RobotModelConfig(
@@ -78,7 +80,9 @@ class Simulator(torch.nn.Module):
             return vel_ctrl, vel_ts
 
         dt = self.engine.get_dt()
-        new_ctrl = torch.zeros_like(vel_ctrl, dtype=vel_ctrl.dtype, device=vel_ctrl.device)
+        new_ctrl = torch.zeros_like(
+            vel_ctrl, dtype=vel_ctrl.dtype, device=vel_ctrl.device
+        )
         new_ts = torch.zeros_like(vel_ts, dtype=vel_ts.dtype, device=vel_ts.device)
 
         for idx in range(vel_ts.shape[0]):
@@ -91,7 +95,9 @@ class Simulator(torch.nn.Module):
 
             curr_idx = 0
             while ts <= end_ts:
-                while curr_idx + 1 < vel_ctrl.shape[1] and ts >= vel_ts[idx, curr_idx + 1]:
+                while (
+                    curr_idx + 1 < vel_ctrl.shape[1] and ts >= vel_ts[idx, curr_idx + 1]
+                ):
                     curr_idx += 1
 
                 # Linear Interpolation of Velocity
@@ -199,4 +205,6 @@ class Simulator(torch.nn.Module):
             prev_q = state.q.clone()
             ts += dt
 
-        return torch.stack(transformations).permute(1, 0, 2, 3), torch.stack(timestamps).permute(1, 0)
+        return torch.stack(transformations).permute(1, 0, 2, 3), torch.stack(
+            timestamps
+        ).permute(1, 0)
