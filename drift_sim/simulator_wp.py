@@ -1,8 +1,7 @@
 import torch
 
-from models.engine_wp import WarpStaticEngine
+from simulator.engine_wp import WarpStaticEngine
 from simulator.numerical import quat_to_rotmat
-from simulator.physics_engine import DPhysicsEngine
 from simulator.physics_engine import find_init_rob_position
 from simulator.utils import PhysicsEngineConfig
 from simulator.utils import PhysicsState
@@ -11,16 +10,33 @@ from simulator.world_config import WorldConfig
 
 
 class Simulator(torch.nn.Module):
-    def __init__(self, robot="helhest", grid_res=0.1, max_coord=6.4, batch_size=1, device=None):
+    def __init__(
+        self, robot="helhest", grid_res=0.1, max_coord=6.4, batch_size=1, device=None
+    ):
         super().__init__()
 
         if robot == "helhest":
             robot_model = RobotModelConfig(
-                mass=90.0,
-                wheel_radii=torch.tensor([0.5, 0.5, 0.5]),
-                wheel_centers=torch.tensor([[0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [-0.5, 0.0, 0.0]]),
+                mass=93.8,
+                cog=torch.tensor([0.145, 0.009, 0.0]),
+                wheel_radii=torch.tensor([0.355, 0.355, 0.355]),
+                wheel_centers=torch.tensor(
+                    [[0.365, 0.365, 0.0], [0.365, -0.365, 0.0], [-0.365, 0.0, 0.0]]
+                ),
+                wheel_inertias=torch.tensor([0.2, 0.2, 0.2]),
+                inertia_tensor=torch.tensor(
+                    [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
+                ),
+            )
+        elif robot == "marv":
+            robot_model = RobotModelConfig(
+                mass=67.8,
+                wheel_radii=torch.tensor([0.12, 0.12, 0.12]),
+                wheel_centers=torch.tensor(
+                    [[0.245, 0.2025, 0.0], [0.245, -0.2025, 0.0], [-0.245, 0.0, 0.0]]
+                ),
                 wheel_inertias=torch.tensor([0.1, 0.1, 0.1]),
-                inertia_tensor=torch.diag(torch.tensor([10.0, 10.0, 20.0])),
+                inertia_tensor=torch.diag(torch.tensor([15.0, 15.0, 30.0])),
             )
         else:
             raise ValueError(f"Unsupported robot: {robot}")
@@ -61,7 +77,9 @@ class Simulator(torch.nn.Module):
         total_time = vel_ts[-1] - vel_ts[0]
         num_steps = int(total_time / sim_dt)
 
-        query_times = torch.linspace(vel_ts[0], vel_ts[-1], num_steps, device=self.device)
+        query_times = torch.linspace(
+            vel_ts[0], vel_ts[-1], num_steps, device=self.device
+        )
 
         idx = torch.searchsorted(vel_ts, query_times, right=True) - 1
         idx = idx.clamp(0, len(vel_ts) - 2)
