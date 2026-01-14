@@ -84,7 +84,7 @@ class DPhysicsEngine(torch.nn.Module):
         world_config: WorldConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Returns the deepest contact points for each wheel and the associated normals.
+        Returns the points of each wheel and the associated normals and penetration depth.
 
         Args:
             robot_points: (B, W, P, 3) positions of wheel sample points
@@ -95,8 +95,6 @@ class DPhysicsEngine(torch.nn.Module):
             dh_points: (B, W, 1, 1) penetration depth at that point
             normals:   (B, W, 1, 3) surface normal at that point
         """
-        B, W, _, _ = robot_points.shape
-
         # --- Interpolate terrain heights for all wheel points ---
         z_points = interpolate_grid(
             world_config.z_grid, robot_points[..., :2], world_config.max_coord
@@ -110,18 +108,9 @@ class DPhysicsEngine(torch.nn.Module):
         # --- Compute penetration depth along normal z ---
         dh = (robot_points[..., 2:3] - z_points) * normals[..., 2:3]  # (B, W, P, 1)
 
-        # --- Find deepest point per wheel ---
-        deepest_idx = torch.argmin(dh, dim=2, keepdim=True)  # (B, W, 1)
-
-        # --- Gather deepest point, depth, and normal ---
-        idx_points = deepest_idx.expand(B, W, 1, 3)
-        points = robot_points.gather(dim=2, index=idx_points)  # (B, W, 1, 3)
-        normals = normals.gather(dim=2, index=idx_points)  # (B, W, 1, 3)
-
-        idx_dh = deepest_idx.expand(B, W, 1, 1)
-        dh_points = dh.gather(dim=2, index=idx_dh)  # (B, W, 1, 1)
-
-        return points, dh_points, normals
+        # Multi-point contact: Return all points, depths, and normals
+        # No reduction (argmin) here.
+        return robot_points, dh, normals
 
     def _calculate_spring_force(
         self,
@@ -135,7 +124,8 @@ class DPhysicsEngine(torch.nn.Module):
         """
         in_contact = (dh_points < 0).float()  # shape (B, W, P, 1)
 
-        num_contacts = in_contact.sum(dim=1, keepdim=True).clamp_min(1)
+        # Count total contacts across all wheels and points to distribute stiffness
+        num_contacts = in_contact.sum(dim=(1, 2), keepdim=True).clamp_min(1)
 
         k = world_config.k_stiffness
         b = (
@@ -207,10 +197,12 @@ class DPhysicsEngine(torch.nn.Module):
             -1, -2
         ) + state.x.unsqueeze(1)
 
-        # Use precomputed relative wheel points
-        wheel_points = (
-            self._wheel_pos_rel[None, :, :, :] + wheel_centers_world[:, :, None, :]
-        )
+        # Rotate precomputed wheel points with the robot body
+        # R is (B, 3, 3), _wheel_pos_rel is (W, P, 3) -> (B, W, P, 3)
+        rotated_wheel_pos_rel = torch.einsum("bij,wpj->bwpi", R, self._wheel_pos_rel)
+
+        # Add to world-frame wheel centers
+        wheel_points = rotated_wheel_pos_rel + wheel_centers_world.unsqueeze(2)
 
         # INFO: if contact points do not touch, they return the closest one
         contact_points, dh_points, normals = self._find_contact_points(
@@ -225,13 +217,17 @@ class DPhysicsEngine(torch.nn.Module):
         omega_world = (R.unsqueeze(1) @ omega_local.unsqueeze(-1)).squeeze(-1)
 
         # v = v_center + ω x (r_contact - r_center)
-        # Squeeze contact_points from (B, 3, 1, 3) to (B, 3, 3)
-        vels_wheel_contact = state.xd.unsqueeze(1).unsqueeze(1) + torch.linalg.cross(
-            omega_world,
-            contact_points.squeeze(2) - wheel_centers_world,
-        ).unsqueeze(2)
+        # contact_points is (B, W, P, 3)
+        # wheel_centers_world is (B, W, 3) -> expand to (B, W, 1, 3)
+        # omega_world is (B, W, 3) -> expand to (B, W, 1, 3)
+        omega_world_expanded = omega_world.unsqueeze(2)
+        r_contact_rel = contact_points - wheel_centers_world.unsqueeze(2)
 
-        # F_springs will be (B, 3, 1, 3)
+        vels_wheel_contact = state.xd.unsqueeze(1).unsqueeze(1) + torch.linalg.cross(
+            omega_world_expanded, r_contact_rel
+        )
+
+        # F_springs will be (B, W, P, 3)
         F_springs = self._calculate_spring_force(
             dh_points, vels_wheel_contact, normals, world_config
         )
@@ -240,8 +236,8 @@ class DPhysicsEngine(torch.nn.Module):
         fric_coeffs = self._find_frict_coeffs_at_contact(contact_points, world_config)
 
         # Normal Force Magnitude: Project Spring Force onto Surface Normal
-        # F_springs: (B, W, 1, 3). normals: (B, W, 1, 3).
-        norms_spring = (F_springs * normals).sum(dim=-1, keepdim=True)  # (B, W, 1, 1)
+        # F_springs: (B, W, P, 3). normals: (B, W, P, 3).
+        norms_spring = (F_springs * normals).sum(dim=-1, keepdim=True)  # (B, W, P, 1)
         F_N = norms_spring.clamp_min(1e-9)
 
         # F_fric = mu * F_N * tanh(v_rel)
@@ -255,13 +251,14 @@ class DPhysicsEngine(torch.nn.Module):
         wheels_in_contact = (norms_spring > 0).float()
         Fs_fric = Fs_fric * wheels_in_contact
 
-        # Net Force per Wheel: (B, W, 1, 3)
+        # Net Force per Wheel Point: (B, W, P, 3)
         F_net_wheels = F_springs - Fs_fric
 
         # Total Force (World Frame)
         # F_grav: (B, 3)
         F_grav_batch = self._F_g.expand(self.config.num_robots, -1)
-        F_net_world = F_grav_batch + F_net_wheels.sum(dim=1).squeeze(1)
+        # Sum over wheels (dim 1) and points (dim 2)
+        F_net_world = F_grav_batch + F_net_wheels.sum(dim=(1, 2))
 
         # Acceleration
         xdd = F_net_world / self.robot_model.mass
@@ -275,10 +272,8 @@ class DPhysicsEngine(torch.nn.Module):
 
         # Torque: r x F
         torque_per_wheel = torch.linalg.cross(r, F_net_wheels)
-        torque_per_wheel = torch.clamp(
-            torque_per_wheel, -self.config.torque_limit, self.config.torque_limit
-        )
-        M_net = torque_per_wheel.sum(dim=1).squeeze(1)  # (B, 3)
+
+        M_net = torque_per_wheel.sum(dim=(1, 2))  # (B, 3)
         # dot(omega) = inv(I) @ (M - omega x (I @ omega))
         Iw = (I_world @ state.omega.unsqueeze(-1)).squeeze(-1)
         w_x_Iw = torch.linalg.cross(state.omega, Iw)
