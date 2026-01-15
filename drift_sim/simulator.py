@@ -56,7 +56,7 @@ class Simulator(torch.nn.Module):
         self.grid_res = grid_res
         self.max_coord = max_coord
         self.batch_size = batch_size
-        self.T_horizon = T_horizon
+        self.T_horizon = torch.tensor(T_horizon)
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
@@ -86,35 +86,26 @@ class Simulator(torch.nn.Module):
         """
         dt = self.engine.get_dt()
         device = vel_ctrl.device
-        B, S = vel_ctrl.shape[:2]
+        B, S = vel_ts.shape
 
-        # 1. Define common target timeline based on the first batch element
-        # We assume intended simulation duration is dictated by the first element's start/end.
-        t_start = vel_ts[0, 0]
-        t_end = t_start + self.T_horizon
-
+        # 1. Define target timeline
         # Create target timestamps: [t_start, t_start + dt, ..., t_end]
-        num_steps = int(torch.ceil((t_end - t_start) / dt).item()) + 1
-        target_ts = t_start + torch.arange(num_steps, device=device) * dt
+        t_start = vel_ts[:, 0].unsqueeze(1)
+        num_steps = int(torch.ceil(self.T_horizon / dt).item()) + 1
+        target_ts = t_start + (torch.arange(num_steps, device=device) * dt).unsqueeze(0).expand(B, -1)
 
         # 2. Prepare for Vectorized Search
         # target_ts_batch: (B, NumTargets)
-        target_ts_batch = target_ts.unsqueeze(0).expand(B, -1).contiguous()
-
-        # Expand vel_ts to match batch size if necessary
-        if vel_ts.shape[0] == 1 and B > 1:
-            vel_ts = vel_ts.expand(B, -1)
-        
+        target_ts_batch = target_ts.contiguous()
         vel_ts = vel_ts.contiguous()
 
         # 3. Find indices in the original timeline
-        # torch.searchsorted supports batched inputs if shapes match except last dim
         idx_right = torch.searchsorted(vel_ts, target_ts_batch, right=True)
 
         # Clamp indices to valid range for interpolation [0, S-2]
         # idx_right corresponds to 'next' element, so we want idx_left to be idx_right - 1
         idx_left = (idx_right - 1).clamp(0, S - 2)
-        idx_right = (idx_left + 1)
+        idx_right = idx_left + 1
 
         # 4. Gather values for interpolation
         # Helper to index (B, S, 3) using (B, NumTargets) indices
