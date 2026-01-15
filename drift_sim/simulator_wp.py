@@ -11,7 +11,13 @@ from simulator.utils import WorldConfig
 
 class Simulator(torch.nn.Module):
     def __init__(
-        self, robot="helhest", grid_res=0.1, max_coord=6.4, batch_size=1, device=None
+        self,
+        robot="helhest",
+        grid_res=0.1,
+        max_coord=6.4,
+        batch_size=1,
+        device=None,
+        T_horizon=5.0,
     ):
         super().__init__()
 
@@ -46,6 +52,7 @@ class Simulator(torch.nn.Module):
         self.grid_res = grid_res
         self.max_coord = max_coord
         self.batch_size = batch_size
+        self.T_horizon = T_horizon
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
@@ -95,11 +102,10 @@ class Simulator(torch.nn.Module):
         vel_ctrl_permuted = vel_ctrl.permute(1, 0, 2)
 
         sim_dt = self.engine_config.dt
-        total_time = ref_ts[-1] - ref_ts[0]
-        num_steps = int(total_time / sim_dt)
+        num_steps = int(self.T_horizon / sim_dt)
 
         query_times = torch.linspace(
-            ref_ts[0], ref_ts[-1], num_steps, device=self.device
+            ref_ts[0], ref_ts[0] + self.T_horizon, num_steps, device=self.device
         )
 
         idx = torch.searchsorted(ref_ts, query_times, right=True) - 1

@@ -13,7 +13,13 @@ from simulator.utils import (
 
 class Simulator(torch.nn.Module):
     def __init__(
-        self, robot="helhest", grid_res=0.1, max_coord=6.4, batch_size=1, device=None
+        self,
+        robot="helhest",
+        grid_res=0.1,
+        max_coord=6.4,
+        batch_size=1,
+        device=None,
+        T_horizon=5.0,
     ):
         super().__init__()
 
@@ -50,6 +56,7 @@ class Simulator(torch.nn.Module):
         self.grid_res = grid_res
         self.max_coord = max_coord
         self.batch_size = batch_size
+        self.T_horizon = T_horizon
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
@@ -66,62 +73,72 @@ class Simulator(torch.nn.Module):
         Parameters
         ----------
         vel_ctrl : torch.Tensor
-            Control inputs for wheel velocities. Shape (B, Steps, 3) where 3 is the number of wheels.
+            Control inputs for wheel velocities. Shape (B, Steps, 3).
         vel_ts : torch.Tensor
             Timestamps associated with the control inputs. Shape (B, Steps).
 
         Returns
         -------
-        vel_ctrl : torch.Tensor
-            Prepared control inputs for wheel velocities. Shape (B, SimSteps, 3).
-        vel_ts : torch.Tensor
-            Prepared timestamps associated with the control inputs. Shape (B, SimSteps).
+        new_ctrl : torch.Tensor
+            Resampled control inputs. Shape (B, SimSteps, 3).
+        new_ts : torch.Tensor
+            Resampled timestamps. Shape (B, SimSteps).
         """
-        if torch.any(vel_ts[-1] != torch.zeros_like(vel_ts[0])):
-            return vel_ctrl, vel_ts
-
         dt = self.engine.get_dt()
-        new_ctrl = torch.zeros_like(
-            vel_ctrl, dtype=vel_ctrl.dtype, device=vel_ctrl.device
+        device = vel_ctrl.device
+        B, S = vel_ctrl.shape[:2]
+
+        # 1. Define common target timeline based on the first batch element
+        # We assume intended simulation duration is dictated by the first element's start/end.
+        t_start = vel_ts[0, 0]
+        t_end = t_start + self.T_horizon
+
+        # Create target timestamps: [t_start, t_start + dt, ..., t_end]
+        num_steps = int(torch.ceil((t_end - t_start) / dt).item()) + 1
+        target_ts = t_start + torch.arange(num_steps, device=device) * dt
+
+        # 2. Prepare for Vectorized Search
+        # target_ts_batch: (B, NumTargets)
+        target_ts_batch = target_ts.unsqueeze(0).expand(B, -1).contiguous()
+
+        # Expand vel_ts to match batch size if necessary
+        if vel_ts.shape[0] == 1 and B > 1:
+            vel_ts = vel_ts.expand(B, -1)
+        
+        vel_ts = vel_ts.contiguous()
+
+        # 3. Find indices in the original timeline
+        # torch.searchsorted supports batched inputs if shapes match except last dim
+        idx_right = torch.searchsorted(vel_ts, target_ts_batch, right=True)
+
+        # Clamp indices to valid range for interpolation [0, S-2]
+        # idx_right corresponds to 'next' element, so we want idx_left to be idx_right - 1
+        idx_left = (idx_right - 1).clamp(0, S - 2)
+        idx_right = (idx_left + 1)
+
+        # 4. Gather values for interpolation
+        # Helper to index (B, S, 3) using (B, NumTargets) indices
+        batch_indices = (
+            torch.arange(B, device=device).unsqueeze(1).expand(-1, num_steps)
         )
-        new_ts = torch.zeros_like(vel_ts, dtype=vel_ts.dtype, device=vel_ts.device)
 
-        for idx in range(vel_ts.shape[0]):
-            ts = vel_ts[idx, 0]
-            i = -1
-            end_ts = 0.0
-            while end_ts == 0:
-                end_ts = vel_ts[idx, i]
-                i -= 1
+        # Values: (B, NumTargets, 3)
+        v_left = vel_ctrl[batch_indices, idx_left]
+        v_right = vel_ctrl[batch_indices, idx_right]
 
-            curr_idx = 0
-            while ts <= end_ts:
-                while (
-                    curr_idx + 1 < vel_ctrl.shape[1] and ts >= vel_ts[idx, curr_idx + 1]
-                ):
-                    curr_idx += 1
+        t_left = vel_ts[batch_indices, idx_left]
+        t_right = vel_ts[batch_indices, idx_right]
 
-                # Linear Interpolation of Velocity
-                if curr_idx + 1 < vel_ctrl.shape[1]:
-                    t0 = vel_ts[idx, curr_idx]
-                    t1 = vel_ts[idx, curr_idx + 1]
-                    v0 = vel_ctrl[idx, curr_idx]
-                    v1 = vel_ctrl[idx, curr_idx + 1]
+        # 5. Interpolate
+        denom = (t_right - t_left).clamp(min=1e-6)
+        alpha = (target_ts_batch - t_left) / denom
 
-                    # Avoid division by zero
-                    dt = max(t1 - t0, 1e-6)
-                    ratio = (ts - t0) / dt
+        # Clamp alpha to [0, 1] to avoid extrapolation issues
+        alpha = alpha.clamp(0.0, 1.0).unsqueeze(-1)
 
-                    curr_velocities = v0 + (v1 - v0) * ratio
-                else:
-                    # End of trajectory, hold last velocity, zero acceleration
-                    curr_velocities = vel_ctrl[idx, curr_idx]
+        new_ctrl = v_left + (v_right - v_left) * alpha
 
-                new_ctrl[idx, curr_idx] = curr_velocities
-                new_ts[idx, curr_idx] = ts
-                ts += dt
-
-        return new_ctrl, new_ts
+        return new_ctrl, target_ts_batch
 
     def predict_trajectory(
         self,
@@ -165,6 +182,11 @@ class Simulator(torch.nn.Module):
 
         vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts)
 
+        # Precompute accelerations (B, SimSteps-1, 3)
+        d_vel = vel_ctrl[:, 1:] - vel_ctrl[:, :-1]
+        d_ts = (vel_ts[:, 1:] - vel_ts[:, :-1]).clamp(min=1e-6).unsqueeze(-1)
+        accels = d_vel / d_ts
+
         ts = vel_ts[:, 0].clone()
         dt = self.engine.get_dt()
         transformations = []
@@ -176,10 +198,8 @@ class Simulator(torch.nn.Module):
             # Update state wheel velocities to match interpolated input
             state.wheel_omega = vel_ctrl[:, idx]
 
-            # Compute current acceleration
-            curr_acceleration = (vel_ctrl[:, idx + 1] - vel_ctrl[:, idx]) / (
-                vel_ts[:, idx + 1] - vel_ts[:, idx]
-            ).clamp(min=1e-6).unsqueeze(-1)
+            # Use precomputed acceleration
+            curr_acceleration = accels[:, idx]
 
             # Forward with acceleration control
             dstate = self.engine.forward(state, curr_acceleration, world_config)
@@ -206,6 +226,7 @@ class Simulator(torch.nn.Module):
             prev_q = state.q.clone()
             ts += dt
 
-        return torch.stack(transformations).permute(1, 0, 2, 3), torch.stack(
-            timestamps
-        ).permute(1, 0)
+        transformations = torch.stack(transformations).permute(1, 0, 2, 3)
+        timestamps = torch.stack(timestamps).permute(1, 0)
+
+        return transformations, timestamps
