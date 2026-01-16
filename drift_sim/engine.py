@@ -272,7 +272,14 @@ class DPhysicsEngine(torch.nn.Module):
         # Torque: r x F
         torque_per_wheel = torch.linalg.cross(r, F_net_wheels)
 
+        # Compute net torque and apply angular damping and torque limits
         M_net = torque_per_wheel.sum(dim=(1, 2))  # (B, 3)
+        M_net = M_net - self.config.ang_damping * state.omega
+        M_net = M_net.clamp(
+            -self.config.torque_limit, self.config.torque_limit
+        )  # apply torque limit
+
+        # Solve for angular acceleration
         # dot(omega) = inv(I) @ (M - omega x (I @ omega))
         Iw = (I_world @ state.omega.unsqueeze(-1)).squeeze(-1)
         w_x_Iw = torch.linalg.cross(state.omega, Iw)

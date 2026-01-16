@@ -283,6 +283,11 @@ def simulate_trajectory_kernel(
                 T_total = T_total + tau_p
 
         # Integration
+        ang_damping = 0.1
+        T_total = T_total - ang_damping * omega
+        t_mag = wp.length(T_total)
+        if t_mag > torque_limit:
+            T_total = T_total * (torque_limit / t_mag)
         xdd = F_total / mass
         Iw = I_world * omega
         w_x_Iw = wp.cross(omega, Iw)
