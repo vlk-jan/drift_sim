@@ -115,7 +115,7 @@ def integrate_quaternion(
     q_new = torch.cat([new_w, new_xyz], dim=-1)
 
     # Normalize to prevent drift
-    return F.normalize(q_new, p=2, dim=-1, eps=eps)
+    return F.normalize(q_new, dim=-1, eps=eps)
 
 
 def interpolate_grid(grid, xy, max_coord):
@@ -219,4 +219,4 @@ def interpolate_surface_normals(
     normals = interpolated.squeeze(-1).transpose(1, 2)
 
     # Normalize (because interpolation doesn't preserve unit length)
-    return F.normalize(normals, dim=-1)
+    return F.normalize(normals, dim=-1, eps=1e-6)

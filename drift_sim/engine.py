@@ -222,9 +222,16 @@ class DPhysicsEngine(torch.nn.Module):
         omega_world_expanded = omega_world.unsqueeze(2)
         r_contact_rel = contact_points - wheel_centers_world.unsqueeze(2)
 
-        vels_wheel_contact = state.xd.unsqueeze(1).unsqueeze(1) + torch.linalg.cross(
-            omega_world_expanded, r_contact_rel
+        # Velocity of contact point P = v_body + omega_body x r_body_P + v_spin
+        # r_body_P = contact_points - state.x
+        r_body_P = contact_points - state.x.unsqueeze(1).unsqueeze(1)
+
+        v_rigid = state.xd.unsqueeze(1).unsqueeze(1) + torch.linalg.cross(
+            state.omega.unsqueeze(1).unsqueeze(1), r_body_P
         )
+        v_spin = torch.linalg.cross(omega_world_expanded, r_contact_rel)
+
+        vels_wheel_contact = v_rigid + v_spin
 
         # F_springs will be (B, W, P, 3)
         F_springs = self._calculate_spring_force(
