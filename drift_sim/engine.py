@@ -244,11 +244,18 @@ class DPhysicsEngine(torch.nn.Module):
         # Refined friction model: direction based on velocity vector, magnitude based on speed
         v_mag = torch.norm(vels_wheel_contact, dim=-1, keepdim=True)
         v_dir = vels_wheel_contact / (v_mag + 1e-6)
-        F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag) * v_dir
 
+        # F_c_raw_mag = mu * F_N * tanh(v)
+        F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag)
+
+        # Impulse limit (scalar)
         F_imp_lim = self.robot_model.mass * v_mag / 3.0 / self.config.dt
-        clamp_factor = torch.clamp(F_imp_lim / (F_c_mag.abs() + 1e-6), max=1.0)
-        Fs_fric = (F_c_mag * clamp_factor) * v_dir
+
+        # Clamp magnitude
+        F_c_mag = torch.min(F_c_mag, F_imp_lim)
+
+        # Apply direction
+        Fs_fric = F_c_mag * v_dir
 
         # Only apply friction if in contact (F_spring > 0)
         wheels_in_contact = (norms_spring > 0).float()
@@ -279,9 +286,11 @@ class DPhysicsEngine(torch.nn.Module):
         # Compute net torque and apply angular damping and torque limits
         M_net = torque_per_wheel.sum(dim=(1, 2))  # (B, 3)
         M_net = M_net - self.config.ang_damping * state.omega
-        M_net = M_net.clamp(
-            -self.config.torque_limit, self.config.torque_limit
-        )  # apply torque limit
+
+        # Apply torque limit (Magnitude clamping)
+        M_mag = torch.norm(M_net, dim=-1, keepdim=True)
+        scale = torch.clamp(self.config.torque_limit / (M_mag + 1e-6), max=1.0)
+        M_net = M_net * scale
 
         # Solve for angular acceleration
         # dot(omega) = inv(I) @ (M - omega x (I @ omega))
