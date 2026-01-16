@@ -244,7 +244,11 @@ class DPhysicsEngine(torch.nn.Module):
         # Refined friction model: direction based on velocity vector, magnitude based on speed
         v_mag = torch.norm(vels_wheel_contact, dim=-1, keepdim=True)
         v_dir = vels_wheel_contact / (v_mag + 1e-6)
-        Fs_fric = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag) * v_dir
+        F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag) * v_dir
+
+        F_imp_lim = self.robot_model.mass * v_mag / 3.0 / self.config.dt
+        clamp_factor = torch.clamp(F_imp_lim / (F_c_mag.abs() + 1e-6), max=1.0)
+        Fs_fric = (F_c_mag * clamp_factor) * v_dir
 
         # Only apply friction if in contact (F_spring > 0)
         wheels_in_contact = (norms_spring > 0).float()

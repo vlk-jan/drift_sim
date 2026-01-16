@@ -178,6 +178,8 @@ def simulate_trajectory_kernel(
     grid_h = z_grid.shape[0]
     grid_w = z_grid.shape[1]
 
+    m_eff = mass / 3.0
+
     for step in range(num_steps):
         wheel_omega = control_velocities[step, tid]
 
@@ -271,8 +273,11 @@ def simulate_trajectory_kernel(
                 if F_N < 0.0:
                     F_N = 0.0
 
-                mu = f_val
-                F_fric = v_dir * (mu * F_N * wp.tanh(v_mag))
+                f_c_mag = f_val * F_N * wp.tanh(v_mag)
+                f_imp_lim = m_eff * v_mag /  dt
+                if f_c_mag > f_imp_lim:
+                    f_c_mag = f_imp_lim
+                F_fric = v_dir * f_c_mag
                 if f_mag <= 1e-6:
                     F_fric = wp.vec3(0.0)
 
@@ -570,10 +575,7 @@ class WarpStaticEngine:
         if requires_grad:
             z_t = world_config.z_grid[0]
             n_t = world_config.normals[0].permute(1, 2, 0).contiguous()
-            if isinstance(world_config.k_friction, torch.Tensor):
-                kf_t = world_config.k_friction[0]
-            else:
-                kf_t = torch.full_like(z_t, world_config.k_friction)
+            kf_t = world_config.k_friction[0]
 
             return WarpTrajectoryFunc.apply(
                 init_state.x,
