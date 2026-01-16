@@ -5,7 +5,6 @@ import torch
 from simulator.numerical import (
     integrate_quaternion,
     interpolate_grid,
-    interpolate_surface_normals,
     interpolate_surface_normals_multi,
     quat_to_rotmat,
 )

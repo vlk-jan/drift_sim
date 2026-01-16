@@ -42,7 +42,7 @@ def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
         R: (..., 3, 3) rotation matrix
     """
     # Normalize the quaternion
-    q = F.normalize(q, dim=-1, eps=1e-12)
+    q = F.normalize(q, dim=-1, eps=1e-6)
 
     w, x, y, z = q.unbind(dim=-1)
 
@@ -77,7 +77,7 @@ def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
 
 
 def integrate_quaternion(
-    q: torch.Tensor, omega: torch.Tensor, dt: float, eps: float = 1e-8
+    q: torch.Tensor, omega: torch.Tensor, dt: float, eps: float = 1e-6
 ) -> torch.Tensor:
     """
     Integrate quaternion using the quaternion derivative.
