@@ -21,6 +21,11 @@ def compute_uv_aligned(x: float, y: float, max_coord: float, width: int, height:
 
 
 @wp.func
+def length_safe(v: wp.vec3):
+    return wp.sqrt(wp.dot(v, v) + 1.0e-6)
+
+
+@wp.func
 def sample_grid_bilinear(
     grid: wp.array2d(dtype=float), u: float, v: float, width: int, height: int
 ):
@@ -98,12 +103,8 @@ def sample_normal_bilinear(
     n1 = n10 * (1.0 - w_u) + n11 * w_u
     n_res = n0 * (1.0 - w_v) + n1 * w_v
 
-    # Avoid normalizing zero vector (out of bounds)
-    length = wp.length(n_res)
-    if length < 1e-6:
-        return wp.vec3(0.0, 0.0, 0.0)
-
-    return n_res / length
+    # Robust normalization using length_safe
+    return n_res / length_safe(n_res)
 
 
 @wp.func
@@ -125,12 +126,19 @@ def softplus_stable(x: float, beta: float):
 
 @wp.func
 def integrate_quat(q: wp.quat, w: wp.vec3, dt: float):
-    w_len = wp.length(w)
-    if w_len < 1e-8:
-        return q
-    angle = w_len * dt
-    axis = w / w_len
-    dq = wp.quat_from_axis_angle(axis, angle)
+    w_len = length_safe(w)
+    theta = w_len * dt * 0.5
+
+    # Numerically stable sinc approximation for small angles to avoid 1/w_len explosion
+    # With length_safe, w_len >= 1e-3, so division is safe.
+    scale = wp.sin(theta) / w_len
+
+    dq_xyz = w * scale
+    dq_w = wp.cos(theta)
+
+    # Construct quaternion directly (x, y, z, w)
+    dq = wp.quat(dq_xyz[0], dq_xyz[1], dq_xyz[2], dq_w)
+
     return wp.normalize(dq * q)
 
 
@@ -267,14 +275,14 @@ def simulate_trajectory_kernel(
                 f_mag = f_mag / contact_count_safe
                 F_spring = n_surf * f_mag
 
-                v_mag = wp.length(v_total)
+                v_mag = length_safe(v_total)
                 v_dir = v_total / (v_mag + 1.0e-6)
                 F_N = wp.dot(F_spring, n_surf)
                 if F_N < 0.0:
                     F_N = 0.0
 
                 f_c_mag = f_val * F_N * wp.tanh(v_mag)
-                f_imp_lim = m_eff * v_mag /  dt
+                f_imp_lim = m_eff * v_mag / dt
                 if f_c_mag > f_imp_lim:
                     f_c_mag = f_imp_lim
                 F_fric = v_dir * f_c_mag
@@ -290,7 +298,7 @@ def simulate_trajectory_kernel(
         # Integration
         ang_damping = 0.1
         T_total = T_total - ang_damping * omega
-        t_mag = wp.length(T_total)
+        t_mag = length_safe(T_total)
         if t_mag > torque_limit:
             T_total = T_total * (torque_limit / t_mag)
         xdd = F_total / mass
@@ -658,3 +666,4 @@ class WarpStaticEngine:
         out_q_wxyz = out_q_xyzw[..., [3, 0, 1, 2]]
 
         return out_x, out_q_wxyz
+
