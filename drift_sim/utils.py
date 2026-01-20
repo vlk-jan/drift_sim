@@ -238,7 +238,7 @@ def find_init_rob_position(
         world_config.normals, xy, world_config.max_coord
     ).reshape(batch_size, 3)
 
-    # Ensure the normal is normalized safely (larger eps for gradient stability)
+    # Ensure the normal is normalized
     n_ground_norm = (n_ground.pow(2).sum(dim=1, keepdim=True) + 1e-6).sqrt()
     n_ground = n_ground / n_ground_norm
 
@@ -263,8 +263,6 @@ def find_init_rob_position(
 
     # Stack to (B, 4): [w, x, y, z]
     q_nominal = torch.cat([qw, qxyz], dim=1)
-
-    # Safe Normalize quaternion
     q_nom_norm = (q_nominal.pow(2).sum(dim=1, keepdim=True) + 1e-6).sqrt()
     q_nominal = q_nominal / q_nom_norm
 
@@ -276,13 +274,10 @@ def find_init_rob_position(
     q_flip = torch.tensor([0.0, 1.0, 0.0, 0.0], device=device).expand(batch_size, 4)
 
     # If vectors are parallel, c is close to 1 or -1.
-    # We use dot product for robust check since 's' is distorted by safe_norm.
     is_parallel = c.abs() > (1.0 - 1e-4)
 
     # Select correct quaternion based on alignment direction
     q_parallel = torch.where(c.expand(batch_size, 4) > 0, q_identity, q_flip)
-
-    # Final selection
     q_final = torch.where(is_parallel.expand(batch_size, 4), q_parallel, q_nominal)
 
     # --- 4. Compose initial position ---

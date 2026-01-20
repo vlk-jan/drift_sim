@@ -666,4 +666,3 @@ class WarpStaticEngine:
         out_q_wxyz = out_q_xyzw[..., [3, 0, 1, 2]]
 
         return out_x, out_q_wxyz
-

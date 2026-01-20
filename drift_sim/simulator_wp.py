@@ -52,13 +52,13 @@ class Simulator(torch.nn.Module):
         self.grid_res = grid_res
         self.max_coord = max_coord
         self.batch_size = batch_size
-        self.T_horizon = T_horizon
+        self.T_horizon = torch.tensor(T_horizon)
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
 
         MAX_STEPS = 1000
-        self.fast_engine = WarpStaticEngine(robot_model, batch_size, MAX_STEPS, device)
+        self.engine = WarpStaticEngine(robot_model, batch_size, MAX_STEPS, device)
         self.engine_config = PhysicsEngineConfig(num_robots=batch_size)
 
     def predict_trajectory(self, properties, vel_ctrl, vel_ts):
@@ -125,7 +125,7 @@ class Simulator(torch.nn.Module):
         dense_controls = v0 + (v1 - v0) * alpha  # (SimSteps, B, 3)
 
         # 4. RUN SUPER KERNEL
-        traj_x, traj_q = self.fast_engine.run_trajectory(
+        traj_x, traj_q = self.engine.run_trajectory(
             state, dense_controls, world_config, self.engine_config
         )
 
