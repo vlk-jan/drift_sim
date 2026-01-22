@@ -20,6 +20,7 @@ class Simulator(torch.nn.Module):
         batch_size=1,
         device=None,
         T_horizon=5.0,
+        dt=0.01,
     ):
         super().__init__()
 
@@ -27,7 +28,7 @@ class Simulator(torch.nn.Module):
             robot_model = RobotModelConfig(
                 mass=93.8,
                 cog=torch.tensor([0.145, 0.009, 0.0]),
-                wheel_radii=torch.tensor([0.355, 0.355, 0.355]),
+                wheel_radii=torch.tensor([0.4685, 0.4685, 0.4685]),
                 wheel_centers=torch.tensor(
                     [[0.365, 0.365, 0.0], [0.365, -0.365, 0.0], [-0.365, 0.0, 0.0]]
                 ),
@@ -51,7 +52,7 @@ class Simulator(torch.nn.Module):
 
         self.robot_model = robot_model
 
-        engine_config = PhysicsEngineConfig(num_robots=batch_size)
+        engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
 
         self.grid_res = grid_res
         self.max_coord = max_coord
@@ -92,7 +93,9 @@ class Simulator(torch.nn.Module):
         # Create target timestamps: [t_start, t_start + dt, ..., t_end]
         t_start = vel_ts[:, 0].unsqueeze(1)
         num_steps = int(torch.ceil(self.T_horizon / dt).item()) + 1
-        target_ts = t_start + (torch.arange(num_steps, device=device) * dt).unsqueeze(0).expand(B, -1)
+        target_ts = t_start + (torch.arange(num_steps, device=device) * dt).unsqueeze(
+            0
+        ).expand(B, -1)
 
         # 2. Prepare for Vectorized Search
         # target_ts_batch: (B, NumTargets)

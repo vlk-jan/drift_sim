@@ -18,6 +18,7 @@ class Simulator(torch.nn.Module):
         batch_size=1,
         device=None,
         T_horizon=5.0,
+        dt=0.01,
     ):
         super().__init__()
 
@@ -25,7 +26,7 @@ class Simulator(torch.nn.Module):
             robot_model = RobotModelConfig(
                 mass=93.8,
                 cog=torch.tensor([0.145, 0.009, 0.0]),
-                wheel_radii=torch.tensor([0.355, 0.355, 0.355]),
+                wheel_radii=torch.tensor([0.4685, 0.4685, 0.4685]),
                 wheel_centers=torch.tensor(
                     [[0.365, 0.365, 0.0], [0.365, -0.365, 0.0], [-0.365, 0.0, 0.0]]
                 ),
@@ -57,9 +58,9 @@ class Simulator(torch.nn.Module):
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
 
-        MAX_STEPS = 1000
+        MAX_STEPS = 100_000
         self.engine = WarpStaticEngine(robot_model, batch_size, MAX_STEPS, device)
-        self.engine_config = PhysicsEngineConfig(num_robots=batch_size)
+        self.engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
 
     def predict_trajectory(self, properties, vel_ctrl, vel_ts):
         """
