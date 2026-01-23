@@ -54,7 +54,7 @@ class WorldConfig(BaseConfig):
     z_grid: torch.Tensor
     grid_res: float
     max_coord: float
-    k_stiffness: Union[float, torch.Tensor] = 40_000.0
+    k_stiffness: Union[float, torch.Tensor] = 400_000.0
     k_friction: Union[float, torch.Tensor] = 0.5
 
     def __post_init__(self):
@@ -64,8 +64,6 @@ class WorldConfig(BaseConfig):
         self.normals = self.normals / torch.linalg.norm(
             self.normals, dim=1, keepdim=True
         )
-        # if not isinstance(self.k_stiffness, torch.Tensor):
-        #     self.k_stiffness = torch.full_like(self.z_grid, self.k_stiffness)
         if not isinstance(self.k_friction, torch.Tensor):
             self.k_friction = torch.full_like(
                 self.z_grid, self.k_friction, dtype=torch.float32
@@ -144,7 +142,7 @@ class PhysicsEngineConfig(BaseConfig):
     """
 
     num_robots: int = 1
-    dt: float = 1e-2
+    dt: float = 1e-3
     g: float = 9.81
     torque_limit: float = 5000.0
     damping_alpha: float = 1.0
