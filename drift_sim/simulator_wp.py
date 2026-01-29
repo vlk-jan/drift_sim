@@ -88,6 +88,7 @@ class Simulator(torch.nn.Module):
             grid_res=self.grid_res,
             max_coord=self.max_coord,
             k_friction=properties["friction"],
+            k_stiffness=properties["stiffness"],
         )
 
         # 2. Setup Initial State

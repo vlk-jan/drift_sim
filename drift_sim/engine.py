@@ -90,9 +90,8 @@ class DPhysicsEngine(torch.nn.Module):
             world_config: World configuration containing terrain grids
 
         Returns:
-            points:    (B, W, 1, 3) deepest contact point per wheel
-            dh_points: (B, W, 1, 1) penetration depth at that point
-            normals:   (B, W, 1, 3) surface normal at that point
+            dh_points: (B, W, P, 1) penetration depth at robot points
+            normals:   (B, W, P, 3) surface normal at robot points
         """
         # --- Interpolate terrain heights for all wheel points ---
         z_points = interpolate_grid(
@@ -107,16 +106,15 @@ class DPhysicsEngine(torch.nn.Module):
         # --- Compute penetration depth along normal z ---
         dh = (robot_points[..., 2:3] - z_points) * normals[..., 2:3]  # (B, W, P, 1)
 
-        # Multi-point contact: Return all points, depths, and normals
-        # No reduction (argmin) here.
-        return robot_points, dh, normals
+        # Multi-point contact: Return all depths and normals
+        return dh, normals
 
     def _calculate_spring_force(
         self,
         dh_points: torch.Tensor,
         xd_points: torch.Tensor,
         normals: torch.Tensor,
-        world_config: WorldConfig,
+        stiffness: torch.Tensor,
     ) -> torch.Tensor:
         """
         Calculate the spring force acting on the robot points.
@@ -126,7 +124,7 @@ class DPhysicsEngine(torch.nn.Module):
         # Count total contacts across all wheels and points to distribute stiffness
         num_contacts = in_contact.sum(dim=(1, 2), keepdim=True).clamp_min(1)
 
-        k = world_config.k_stiffness
+        k = stiffness.unsqueeze(-1)  # shape (B, W, 1, 1)
         b = (
             self.config.damping_alpha
             * 2
@@ -154,17 +152,23 @@ class DPhysicsEngine(torch.nn.Module):
         # shape (B, 3, 3), the spring force acting on the robot points
         return F_spring * in_contact / num_contacts
 
-    def _find_frict_coeffs_at_contact(
-        self, contact_points: torch.Tensor, world_config: WorldConfig
+    def _find_coeffs_at_contact(
+        self, contact_points: torch.Tensor, world_config: WorldConfig, coeff_name: str
     ) -> torch.Tensor:
-        if isinstance(world_config.k_friction, torch.Tensor):
+        if coeff_name == "friction":
+            coeff_grid = world_config.k_friction
+        elif coeff_name == "stiffness":
+            coeff_grid = world_config.k_stiffness
+        else:
+            raise ValueError(f"Unknown coefficient name: {coeff_name}")
+        if isinstance(coeff_grid, torch.Tensor):
             fric_coeffs = interpolate_grid(
-                world_config.k_friction,
+                coeff_grid,
                 contact_points[..., :2],
                 world_config.max_coord,
             ).squeeze(-1)
         else:
-            k = world_config.k_friction
+            k = coeff_grid
             B, W = contact_points.shape[:2]
             fric_coeffs = torch.full(
                 (B, W, 1), k, device=self.device, dtype=contact_points.dtype
@@ -204,8 +208,9 @@ class DPhysicsEngine(torch.nn.Module):
         wheel_points = rotated_wheel_pos_rel + wheel_centers_world.unsqueeze(2)
 
         # INFO: if contact points do not touch, they return the closest one
-        contact_points, dh_points, normals = self._find_contact_points(
-            wheel_points, world_config
+        dh_points, normals = self._find_contact_points(wheel_points, world_config)
+        stif_coeffs = self._find_coeffs_at_contact(
+            wheel_points, world_config, "stiffness"
         )
 
         # Interpret wheel_omega as scalars around Y-axis (Robot Frame)
@@ -220,11 +225,11 @@ class DPhysicsEngine(torch.nn.Module):
         # wheel_centers_world is (B, W, 3) -> expand to (B, W, 1, 3)
         # omega_world is (B, W, 3) -> expand to (B, W, 1, 3)
         omega_world_expanded = omega_world.unsqueeze(2)
-        r_contact_rel = contact_points - wheel_centers_world.unsqueeze(2)
+        r_contact_rel = wheel_points - wheel_centers_world.unsqueeze(2)
 
         # Velocity of contact point P = v_body + omega_body x r_body_P + v_spin
         # r_body_P = contact_points - state.x
-        r_body_P = contact_points - state.x.unsqueeze(1).unsqueeze(1)
+        r_body_P = wheel_points - state.x.unsqueeze(1).unsqueeze(1)
 
         v_rigid = state.xd.unsqueeze(1).unsqueeze(1) + torch.linalg.cross(
             state.omega.unsqueeze(1).unsqueeze(1), r_body_P
@@ -235,11 +240,13 @@ class DPhysicsEngine(torch.nn.Module):
 
         # F_springs will be (B, W, P, 3)
         F_springs = self._calculate_spring_force(
-            dh_points, vels_wheel_contact, normals, world_config
+            dh_points, vels_wheel_contact, normals, stif_coeffs
         )
 
         # Friction
-        fric_coeffs = self._find_frict_coeffs_at_contact(contact_points, world_config)
+        fric_coeffs = self._find_coeffs_at_contact(
+            wheel_points, world_config, "friction"
+        )
 
         # Normal Force Magnitude: Project Spring Force onto Surface Normal
         # F_springs: (B, W, P, 3). normals: (B, W, P, 3).
@@ -285,7 +292,7 @@ class DPhysicsEngine(torch.nn.Module):
         com_world = state.x + (R @ self.robot_model.cog.to(self.device).float())
 
         # r: Vector from CoM to Contact Points
-        r = contact_points - com_world.unsqueeze(1).unsqueeze(1)
+        r = wheel_points - com_world.unsqueeze(1).unsqueeze(1)
 
         # Torque: r x F
         torque_per_wheel = torch.linalg.cross(r, F_net_wheels)

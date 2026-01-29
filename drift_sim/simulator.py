@@ -168,6 +168,7 @@ class Simulator(torch.nn.Module):
             grid_res=self.grid_res,
             max_coord=self.max_coord,
             k_friction=properties["friction"],
+            k_stiffness=properties["stiffness"],
         )
         state = PhysicsState.dummy(batch_size=self.batch_size, device=self.device)
         state.x, state.q = find_init_rob_position(

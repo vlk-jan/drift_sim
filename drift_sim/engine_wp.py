@@ -160,12 +160,12 @@ def simulate_trajectory_kernel(
     z_grid: wp.array2d(dtype=float),
     normals_grid: wp.array2d(dtype=wp.vec3),
     friction_grid: wp.array2d(dtype=float),
+    stiffness_grid: wp.array2d(dtype=float),
     max_coord: float,
     dt: float,
     num_steps: int,
     num_wheel_points: int,
     gravity: float,
-    k_stiffness: float,
     damping_alpha: float,
     soft_contact_sigma: float,
     torque_limit: float,
@@ -230,7 +230,9 @@ def simulate_trajectory_kernel(
         contact_count_safe = total_active_contacts
         if contact_count_safe < 1.0:
             contact_count_safe = 1.0
-        b_damp = damping_alpha * 2.0 * wp.sqrt(mass * k_stiffness / contact_count_safe)
+
+        # Pre-calculate damping constant
+        damp_const = damping_alpha * 2.0 * wp.sqrt(mass / contact_count_safe)
         com_world = x + wp.quat_rotate(q, cog_val)
 
         # ---------------------------------------------------------------------
@@ -256,6 +258,7 @@ def simulate_trajectory_kernel(
                 z_surf = sample_grid_bilinear(z_grid, u, v, grid_w, grid_h)
                 n_surf = sample_normal_bilinear(normals_grid, u, v, grid_w, grid_h)
                 f_val = sample_grid_bilinear(friction_grid, u, v, grid_w, grid_h)
+                k_s = sample_grid_bilinear(stiffness_grid, u, v, grid_w, grid_h)
 
                 dist = (p_world[2] - z_surf) * n_surf[2]
 
@@ -268,7 +271,8 @@ def simulate_trajectory_kernel(
                 v_total = v_rigid + v_spin
                 vn = wp.dot(v_total, n_surf)
 
-                f_raw = -k_stiffness * dist - b_damp * vn
+                b_damp = damp_const * wp.sqrt(k_s)
+                f_raw = -k_s * dist - b_damp * vn
                 beta = 1.0 / soft_contact_sigma
                 f_mag = softplus_stable(f_raw, beta)
 
@@ -330,6 +334,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         z_grid_t,
         normals_grid_t,
         friction_grid_t,
+        stiffness_grid_t,
         wheel_centers_wp,
         wheel_radii_wp,
         inertia_wp,
@@ -340,7 +345,6 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         num_steps,
         num_wheel_points,
         g,
-        k_stiffness,
         damping_alpha,
         soft_contact_sigma,
         torque_limit,
@@ -387,6 +391,11 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             dtype=wp.float32,
             requires_grad=friction_grid_t.requires_grad,
         )
+        wp_ks = wp.from_torch(
+            stiffness_grid_t.detach(),
+            dtype=wp.float32,
+            requires_grad=stiffness_grid_t.requires_grad,
+        )
 
         wp_out_x = wp.zeros(
             (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
@@ -414,12 +423,12 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                     wp_z,
                     wp_n,
                     wp_kf,
+                    wp_ks,
                     max_coord,
                     dt,
                     num_steps,
                     num_wheel_points,
                     g,
-                    k_stiffness,
                     damping_alpha,
                     soft_contact_sigma,
                     torque_limit,
@@ -437,6 +446,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             "z": wp_z,
             "n": wp_n,
             "kf": wp_kf,
+            "ks": wp_ks,
         }
         ctx.wp_outputs = [wp_out_x, wp_out_q]
 
@@ -481,7 +491,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             get_grad("z"),
             get_grad("n"),
             get_grad("kf"),
-            None,
+            get_grad("ks"),
             None,
             None,
             None,
@@ -540,6 +550,7 @@ class WarpStaticEngine:
         self.cached_z = None
         self.cached_n = None
         self.cached_kf = None
+        self.cached_ks = None
 
     def _update_world_cache(self, world_config):
         if self.cached_z is None:
@@ -566,6 +577,19 @@ class WarpStaticEngine:
                     fric_t, dtype=wp.float32, requires_grad=False
                 )
 
+            if isinstance(world_config.k_stiffness, torch.Tensor):
+                ks_t = world_config.k_stiffness[0]
+                self.cached_ks = wp.from_torch(
+                    ks_t, dtype=wp.float32, requires_grad=ks_t.requires_grad
+                )
+            else:
+                stiff_t = torch.full_like(
+                    world_config.z_grid[0], world_config.k_stiffness
+                )
+                self.cached_ks = wp.from_torch(
+                    stiff_t, dtype=wp.float32, requires_grad=False
+                )
+
     def run_trajectory(
         self, init_state, control_velocities, world_config, engine_config
     ):
@@ -578,12 +602,17 @@ class WarpStaticEngine:
                 isinstance(world_config.k_friction, torch.Tensor)
                 and world_config.k_friction.requires_grad
             )
+            or (
+                isinstance(world_config.k_stiffness, torch.Tensor)
+                and world_config.k_stiffness.requires_grad
+            )
         )
 
         if requires_grad:
             z_t = world_config.z_grid[0]
             n_t = world_config.normals[0].permute(1, 2, 0).contiguous()
             kf_t = world_config.k_friction[0]
+            ks_t = world_config.k_stiffness[0]
 
             return WarpTrajectoryFunc.apply(
                 init_state.x,
@@ -594,6 +623,7 @@ class WarpStaticEngine:
                 z_t,
                 n_t,
                 kf_t,
+                ks_t,
                 self.wp_wheel_centers,
                 self.wp_wheel_radii,
                 self.wp_inertia,
@@ -604,7 +634,6 @@ class WarpStaticEngine:
                 num_steps,
                 16,
                 engine_config.g,
-                world_config.k_stiffness,
                 engine_config.damping_alpha,
                 engine_config.soft_contact_sigma
                 if engine_config.soft_contact_sigma
@@ -645,12 +674,12 @@ class WarpStaticEngine:
                 self.cached_z,
                 self.cached_n,
                 self.cached_kf,
+                self.cached_ks,
                 world_config.max_coord,
                 engine_config.dt,
                 num_steps,
                 16,
                 engine_config.g,
-                world_config.k_stiffness,
                 engine_config.damping_alpha,
                 engine_config.soft_contact_sigma
                 if engine_config.soft_contact_sigma

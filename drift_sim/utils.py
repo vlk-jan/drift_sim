@@ -68,6 +68,10 @@ class WorldConfig(BaseConfig):
             self.k_friction = torch.full_like(
                 self.z_grid, self.k_friction, dtype=torch.float32
             )
+        if not isinstance(self.k_stiffness, torch.Tensor):
+            self.k_stiffness = torch.full_like(
+                self.z_grid, self.k_stiffness, dtype=torch.float32
+            )
 
     def _compute_heightmap_gradients(self, z_grid: torch.Tensor) -> torch.Tensor:
         """
