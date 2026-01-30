@@ -56,8 +56,8 @@ class DPhysicsEngine(torch.nn.Module):
         wheel_radii = self.robot_model.wheel_radii.to(self.device)
 
         # Shape (n_wheels, n_pts)
-        x = torch.zeros((n_wheels, n_points), device=self.device)
-        y = wheel_radii[:, None] * torch.cos(theta)[None, :]
+        y = torch.zeros((n_wheels, n_points), device=self.device)
+        x = wheel_radii[:, None] * torch.cos(theta)[None, :]
         z = -wheel_radii[:, None] * torch.sin(theta)[None, :]
 
         # (n_wheels, n_points, 3)

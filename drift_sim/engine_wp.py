@@ -112,7 +112,7 @@ def get_wheel_point_local(i: int, total_points: int, radius: float):
     theta = (2.0 * wp.PI * float(i)) / float(total_points)
     c = wp.cos(theta)
     s = wp.sin(theta)
-    return wp.vec3(0.0, radius * c, -radius * s)
+    return wp.vec3(radius * c, 0.0, -radius * s)
 
 
 @wp.func
@@ -262,42 +262,43 @@ def simulate_trajectory_kernel(
 
                 dist = (p_world[2] - z_surf) * n_surf[2]
 
-                # Physics
-                r_w_c = p_world - w_center_world
-                r_com_p = p_world - com_world
+                if dist < 0.0:
+                    # Physics
+                    r_w_c = p_world - w_center_world
+                    r_com_p = p_world - com_world
 
-                v_rigid = xd + wp.cross(omega, r_com_p)
-                v_spin = wp.cross(w_vec_world, r_w_c)
-                v_total = v_rigid + v_spin
-                vn = wp.dot(v_total, n_surf)
+                    v_rigid = xd + wp.cross(omega, r_com_p)
+                    v_spin = wp.cross(w_vec_world, r_w_c)
+                    v_total = v_rigid + v_spin
+                    vn = wp.dot(v_total, n_surf)
 
-                b_damp = damp_const * wp.sqrt(k_s)
-                f_raw = -k_s * dist - b_damp * vn
-                beta = 1.0 / soft_contact_sigma
-                f_mag = softplus_stable(f_raw, beta)
+                    b_damp = damp_const * wp.sqrt(k_s)
+                    f_raw = -k_s * dist - b_damp * vn
+                    beta = 1.0 / soft_contact_sigma
+                    f_mag = softplus_stable(f_raw, beta)
 
-                f_mag = f_mag / contact_count_safe
-                F_spring = n_surf * f_mag
+                    f_mag = f_mag / contact_count_safe
+                    F_spring = n_surf * f_mag
 
-                v_mag = length_safe(v_total)
-                v_dir = v_total / (v_mag + 1.0e-6)
-                F_N = wp.dot(F_spring, n_surf)
-                if F_N < 0.0:
-                    F_N = 0.0
+                    v_mag = length_safe(v_total)
+                    v_dir = v_total / (v_mag + 1.0e-6)
+                    F_N = wp.dot(F_spring, n_surf)
+                    if F_N < 0.0:
+                        F_N = 0.0
 
-                f_c_mag = f_val * F_N * wp.tanh(v_mag)
-                f_imp_lim = m_eff * v_mag / dt
-                if f_c_mag > f_imp_lim:
-                    f_c_mag = f_imp_lim
-                F_fric = v_dir * f_c_mag
-                if f_mag <= 1e-6:
-                    F_fric = wp.vec3(0.0)
+                    f_c_mag = f_val * F_N * wp.tanh(v_mag)
+                    f_imp_lim = m_eff * v_mag / dt
+                    if f_c_mag > f_imp_lim:
+                        f_c_mag = f_imp_lim
+                    F_fric = v_dir * f_c_mag
+                    if f_mag <= 1e-6:
+                        F_fric = wp.vec3(0.0)
 
-                F_point = F_spring - F_fric
-                F_total = F_total + F_point
+                    F_point = F_spring - F_fric
+                    F_total = F_total + F_point
 
-                tau_p = wp.cross(r_com_p, F_point)
-                T_total = T_total + tau_p
+                    tau_p = wp.cross(r_com_p, F_point)
+                    T_total = T_total + tau_p
 
         # Integration
         ang_damping = 0.1
