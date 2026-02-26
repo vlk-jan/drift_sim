@@ -7,7 +7,6 @@ from tensordict import TensorClass
 from simulator.numerical import (
     unit_quaternion,
     interpolate_grid,
-    interpolate_surface_normals,
 )
 
 
@@ -58,6 +57,9 @@ class WorldConfig(BaseConfig):
     k_friction: Union[float, torch.Tensor] = 0.5
 
     def __post_init__(self):
+        # Ensure all inputs are float32 to avoid dtype mismatches in torch operations
+        self.z_grid = self.z_grid.to(torch.float32)
+
         z_grid_grad = self._compute_heightmap_gradients(self.z_grid)  # (B, 2, D, D)
         ones = torch.ones_like(z_grid_grad[:, 0]).unsqueeze(1)
         self.normals = torch.cat((-z_grid_grad, ones), dim=1)
@@ -68,10 +70,15 @@ class WorldConfig(BaseConfig):
             self.k_friction = torch.full_like(
                 self.z_grid, self.k_friction, dtype=torch.float32
             )
+        else:
+            self.k_friction = self.k_friction.to(torch.float32)
+
         if not isinstance(self.k_stiffness, torch.Tensor):
             self.k_stiffness = torch.full_like(
                 self.z_grid, self.k_stiffness, dtype=torch.float32
             )
+        else:
+            self.k_stiffness = self.k_stiffness.to(torch.float32)
 
     def _compute_heightmap_gradients(self, z_grid: torch.Tensor) -> torch.Tensor:
         """
@@ -226,38 +233,64 @@ def find_init_rob_position(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Find the initial position (x) and orientation (q) of the robot so that it rests
-    on the terrain at (0,0,unknown height).
+    on the terrain at (0,0) by checking the height of the 3 wheel contact points.
 
     Returns:
         x_init: (B, 3)  world position
         q_init: (B, 4)  unit quaternion [w, x, y, z]
     """
 
-    # --- 1. Terrain height + normal at (0, 0) ---
-    xy = torch.zeros((batch_size, 1, 2), device=device)  # shape (B, N=1, 2)
-    z_ground = interpolate_grid(
-        world_config.z_grid, xy, world_config.max_coord
-    ).reshape(batch_size, 1)
-    n_ground = interpolate_surface_normals(
-        world_config.normals, xy, world_config.max_coord
-    ).reshape(batch_size, 3)
+    # --- 1. Get wheel XY positions assuming robot is at origin with 0 yaw ---
+    # shape: (3, 3) -> (B, 3, 2)
+    wheel_centers = torch.as_tensor(
+        robot_model.wheel_centers, device=device, dtype=torch.float32
+    )
+    xy_wheels = wheel_centers[:, :2].unsqueeze(0).expand(batch_size, -1, -1)
 
-    # Ensure the normal is normalized
+    # --- 2. Sample terrain height at the 3 wheel positions ---
+    # z_wheels shape: (B, 3, 1)
+    z_wheels = (
+        interpolate_grid(world_config.z_grid, xy_wheels, world_config.max_coord)
+        .reshape(batch_size, -1)
+        .unsqueeze(-1)
+    )
+    print(z_wheels)
+
+    # Construct 3D points on the terrain at the wheels: shape (B, 3, 3)
+    P = torch.cat([xy_wheels, z_wheels], dim=-1)
+
+    # --- 3. Compute normal of the plane passing through the 3 contact points ---
+    v1 = P[:, 1, :] - P[:, 0, :]  # Vector from wheel 0 to wheel 1
+    v2 = P[:, 2, :] - P[:, 0, :]  # Vector from wheel 0 to wheel 2
+    n_ground = torch.linalg.cross(v1, v2, dim=1)
+
+    # Ensure the normal vector points upwards
+    n_ground = torch.where(n_ground[:, 2:3] < 0, -n_ground, n_ground)
     n_ground_norm = (n_ground.pow(2).sum(dim=1, keepdim=True) + 1e-6).sqrt()
     n_ground = n_ground / n_ground_norm
 
-    # --- 2. Compute reference offset for wheels / CoM ---
+    # --- 4. Compute reference offset for wheels / CoM ---
     wheel_radii = torch.as_tensor(
         robot_model.wheel_radii, device=device, dtype=torch.float32
     )
-    z_offset = wheel_radii.mean()
-    z_init = z_ground + z_offset
+    R = wheel_radii.mean()
 
-    # --- 3. Compute orientation aligning robot up-axis with terrain normal ---
+    # --- 5. Compute correct Z origin height ---
+    # We want to place the origin at (0, 0, z_init) such that the distance to the
+    # contact plane along the normal is exactly the wheel radius R.
+    # Plane eq: dot(n, X - P0) = R => n_z * (z_init - P0_z) - n_x*P0_x - n_y*P0_y = R
+    P0 = P[:, 0, :]
+    nx = n_ground[:, 0:1]
+    ny = n_ground[:, 1:2]
+    nz = n_ground[:, 2:3].clamp_min(1e-6)
+
+    z_init = P0[:, 2:3] + (nx * P0[:, 0:1] + ny * P0[:, 1:2] + R) / nz
+
+    # --- 6. Compute orientation aligning robot up-axis with terrain normal ---
     z_body = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
 
     # Compute axis–angle rotation: rotate z_body → n_ground
-    v = torch.linalg.cross(z_body, n_ground)
+    v = torch.linalg.cross(z_body, n_ground, dim=1)
 
     # --- Rotation Calculation (Axis-Angle to Quaternion) ---
     c = (z_body * n_ground).sum(dim=1, keepdim=True)
@@ -271,20 +304,14 @@ def find_init_rob_position(
     q_nominal = q_nominal / q_nom_norm
 
     # --- Handle Singularities (Perfectly Upright or Upside Down) ---
-    # Case A: Already aligned (c > 0) -> Identity Quaternion
     q_identity = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(batch_size, 4)
-
-    # Case B: Upside down (c < 0) -> 180 deg flip around X
     q_flip = torch.tensor([0.0, 1.0, 0.0, 0.0], device=device).expand(batch_size, 4)
 
-    # If vectors are parallel, c is close to 1 or -1.
     is_parallel = c.abs() > (1.0 - 1e-4)
-
-    # Select correct quaternion based on alignment direction
     q_parallel = torch.where(c.expand(batch_size, 4) > 0, q_identity, q_flip)
     q_final = torch.where(is_parallel.expand(batch_size, 4), q_parallel, q_nominal)
 
-    # --- 4. Compose initial position ---
+    # --- 7. Compose initial position ---
     x_init = torch.zeros((batch_size, 3), device=device)
     x_init[:, 2] = z_init.squeeze(-1)
 

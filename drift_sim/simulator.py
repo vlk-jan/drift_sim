@@ -15,8 +15,6 @@ class Simulator(torch.nn.Module):
     def __init__(
         self,
         robot="helhest",
-        grid_res=0.1,
-        max_coord=6.4,
         batch_size=1,
         device=None,
         T_horizon=5.0,
@@ -54,8 +52,6 @@ class Simulator(torch.nn.Module):
 
         engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
 
-        self.grid_res = grid_res
-        self.max_coord = max_coord
         self.batch_size = batch_size
         self.T_horizon = torch.tensor(T_horizon)
         if device is None:
@@ -165,8 +161,8 @@ class Simulator(torch.nn.Module):
 
         world_config = WorldConfig(
             z_grid=properties["geom"],
-            grid_res=self.grid_res,
-            max_coord=self.max_coord,
+            grid_res=properties["res"],
+            max_coord=properties["max_coord"],
             k_friction=properties["friction"],
             k_stiffness=properties["stiffness"],
         )
