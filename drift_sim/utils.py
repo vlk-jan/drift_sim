@@ -254,7 +254,6 @@ def find_init_rob_position(
         .reshape(batch_size, -1)
         .unsqueeze(-1)
     )
-    print(z_wheels)
 
     # Construct 3D points on the terrain at the wheels: shape (B, 3, 3)
     P = torch.cat([xy_wheels, z_wheels], dim=-1)
