@@ -163,6 +163,8 @@ class Simulator(torch.nn.Module):
             z_grid=properties["geom"],
             grid_res=properties["res"],
             max_coord=properties["max_coord"],
+            side_range=properties["side_range"],
+            fwd_range=properties["fwd_range"],
             k_friction=properties["friction"],
             k_stiffness=properties["stiffness"],
         )

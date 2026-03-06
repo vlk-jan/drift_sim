@@ -95,12 +95,16 @@ class DPhysicsEngine(torch.nn.Module):
         """
         # --- Interpolate terrain heights for all wheel points ---
         z_points = interpolate_grid(
-            world_config.z_grid, robot_points[..., :2], world_config.max_coord
+            world_config.z_grid,
+            robot_points[..., :2] - world_config.grid_center,
+            world_config.max_coord,
         )  # (B, W, P, 1)
 
         # --- Compute normals per wheel sample point ---
         normals = interpolate_surface_normals_multi(
-            world_config.normals, robot_points[..., :2], world_config.max_coord
+            world_config.normals,
+            robot_points[..., :2] - world_config.grid_center,
+            world_config.max_coord,
         )  # (B, W, P, 3)
 
         # --- Compute penetration depth along normal z ---
@@ -164,7 +168,7 @@ class DPhysicsEngine(torch.nn.Module):
         if isinstance(coeff_grid, torch.Tensor):
             fric_coeffs = interpolate_grid(
                 coeff_grid,
-                contact_points[..., :2],
+                contact_points[..., :2] - world_config.grid_center,
                 world_config.max_coord,
             ).squeeze(-1)
         else:

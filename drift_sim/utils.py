@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 
 import torch
 from tensordict import TensorClass
@@ -52,7 +52,9 @@ class WorldConfig(BaseConfig):
 
     z_grid: torch.Tensor
     grid_res: float
-    max_coord: float
+    max_coord: Union[float, Tuple[float, float]]
+    side_range: Tuple[float, float] = (0.0, 0.0)
+    fwd_range: Tuple[float, float] = (0.0, 0.0)
     k_stiffness: Union[float, torch.Tensor] = 400_000.0
     k_friction: Union[float, torch.Tensor] = 0.5
 
@@ -60,12 +62,34 @@ class WorldConfig(BaseConfig):
         # Ensure all inputs are float32 to avoid dtype mismatches in torch operations
         self.z_grid = self.z_grid.to(torch.float32)
 
+        # Convert max_coord into a 2D tensor for grid_sample broadcasting
+        if isinstance(self.max_coord, (list, tuple)):
+            self.max_coord = torch.tensor(
+                self.max_coord, dtype=torch.float32, device=self.z_grid.device
+            )
+        elif isinstance(self.max_coord, (float, int)):
+            self.max_coord = torch.tensor(
+                [self.max_coord, self.max_coord],
+                dtype=torch.float32,
+                device=self.z_grid.device,
+            )
+        else:
+            self.max_coord = self.max_coord.to(
+                dtype=torch.float32, device=self.z_grid.device
+            )
+
         z_grid_grad = self._compute_heightmap_gradients(self.z_grid)  # (B, 2, D, D)
         ones = torch.ones_like(z_grid_grad[:, 0]).unsqueeze(1)
         self.normals = torch.cat((-z_grid_grad, ones), dim=1)
         self.normals = self.normals / torch.linalg.norm(
             self.normals, dim=1, keepdim=True
         )
+
+        if self.side_range == (0.0, 0.0):
+            self.side_range = (-self.max_coord, self.max_coord)
+        if self.fwd_range == (0.0, 0.0):
+            self.fwd_range = (-self.max_coord, self.max_coord)
+
         if not isinstance(self.k_friction, torch.Tensor):
             self.k_friction = torch.full_like(
                 self.z_grid, self.k_friction, dtype=torch.float32
@@ -98,14 +122,16 @@ class WorldConfig(BaseConfig):
         )
 
     @property
-    def grid_size(self) -> int:
+    def grid_center(self) -> torch.Tensor:
         """
-        Returns the size of the grid.
+        Returns the center of the grid based on the fwd and side bounds.
 
-        Returns:
-            int: size of the grid.
+        Return:
+            Tuple[float, float]: center of the grid
         """
-        return self.z_grid.shape[-1]
+        center_y = (self.fwd_range[0] + self.fwd_range[1]) / 2
+        center_x = (self.side_range[0] + self.side_range[1]) / 2
+        return torch.tensor((center_x, center_y))
 
     def ij_to_xyz(
         self, ij: Union[torch.IntTensor, torch.LongTensor]
@@ -242,6 +268,7 @@ def find_init_rob_position(
 
     # --- 1. Get wheel XY positions assuming robot is at origin with 0 yaw ---
     # shape: (3, 3) -> (B, 3, 2)
+    grid_center = world_config.grid_center
     wheel_centers = torch.as_tensor(
         robot_model.wheel_centers, device=device, dtype=torch.float32
     )
@@ -250,7 +277,9 @@ def find_init_rob_position(
     # --- 2. Sample terrain height at the 3 wheel positions ---
     # z_wheels shape: (B, 3, 1)
     z_wheels = (
-        interpolate_grid(world_config.z_grid, xy_wheels, world_config.max_coord)
+        interpolate_grid(
+            world_config.z_grid, xy_wheels - grid_center, world_config.max_coord
+        )
         .reshape(batch_size, -1)
         .unsqueeze(-1)
     )
@@ -283,7 +312,7 @@ def find_init_rob_position(
     ny = n_ground[:, 1:2]
     nz = n_ground[:, 2:3].clamp_min(1e-6)
 
-    z_init = P0[:, 2:3] + (nx * P0[:, 0:1] + ny * P0[:, 1:2] + R) / nz
+    z_init = P0[:, 2] + (nx * P0[:, 0] + ny * P0[:, 1] + R) / nz
 
     # --- 6. Compute orientation aligning robot up-axis with terrain normal ---
     z_body = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
