@@ -9,14 +9,21 @@ wp.init()
 # 1. Helper Math Functions (Device Functions)
 # -----------------------------------------------------------------------------
 @wp.func
-def compute_uv_aligned(x: float, y: float, max_coord: float, width: int, height: int):
+def compute_uv_aligned(
+    x: float,
+    y: float,
+    grid_center: wp.vec2,
+    max_coord: wp.vec2,
+    width: int,
+    height: int,
+):
     """
     Computes grid indices (u, v) matching PyTorch's grid_sample(align_corners=True).
-    Maps physical range [-max_coord, max_coord] to [0, width-1].
+    Maps physical range [center - max_coord, center + max_coord] to [0, width-1].
     """
     # Normalize x to [-1, 1], then map to [0, width-1]
-    u = (x / max_coord + 1.0) * (float(width) - 1.0) * 0.5
-    v = (y / max_coord + 1.0) * (float(height) - 1.0) * 0.5
+    u = ((x - grid_center[0]) / max_coord[0] + 1.0) * (float(width) - 1.0) * 0.5
+    v = ((y - grid_center[1]) / max_coord[1] + 1.0) * (float(height) - 1.0) * 0.5
     return u, v
 
 
@@ -161,7 +168,8 @@ def simulate_trajectory_kernel(
     normals_grid: wp.array2d(dtype=wp.vec3),
     friction_grid: wp.array2d(dtype=float),
     stiffness_grid: wp.array2d(dtype=float),
-    max_coord: float,
+    grid_center: wp.vec2,
+    max_coord: wp.vec2,
     dt: float,
     num_steps: int,
     num_wheel_points: int,
@@ -214,7 +222,7 @@ def simulate_trajectory_kernel(
                 p_world = w_c_world + wp.quat_rotate(q, p_rel)
 
                 u, v = compute_uv_aligned(
-                    p_world[0], p_world[1], max_coord, grid_w, grid_h
+                    p_world[0], p_world[1], grid_center, max_coord, grid_w, grid_h
                 )
 
                 z_surf = sample_grid_bilinear(z_grid, u, v, grid_w, grid_h)
@@ -253,7 +261,7 @@ def simulate_trajectory_kernel(
 
                 # Re-sample grid (necessary to avoid large local memory usage)
                 u, v = compute_uv_aligned(
-                    p_world[0], p_world[1], max_coord, grid_w, grid_h
+                    p_world[0], p_world[1], grid_center, max_coord, grid_w, grid_h
                 )
                 z_surf = sample_grid_bilinear(z_grid, u, v, grid_w, grid_h)
                 n_surf = sample_normal_bilinear(normals_grid, u, v, grid_w, grid_h)
@@ -341,7 +349,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         inertia_wp,
         cog_wp,
         mass,
-        max_coord,
+        grid_center_t,
+        max_coord_t,
         dt,
         num_steps,
         num_wheel_points,
@@ -398,6 +407,10 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             requires_grad=stiffness_grid_t.requires_grad,
         )
 
+        # grid_center and max_coord are small tensors (2,), convert to wp.vec2
+        gc_wp = wp.vec2(float(grid_center_t[0]), float(grid_center_t[1]))
+        mc_wp = wp.vec2(float(max_coord_t[0]), float(max_coord_t[1]))
+
         wp_out_x = wp.zeros(
             (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
         )
@@ -425,7 +438,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                     wp_n,
                     wp_kf,
                     wp_ks,
-                    max_coord,
+                    gc_wp,
+                    mc_wp,
                     dt,
                     num_steps,
                     num_wheel_points,
@@ -493,6 +507,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             get_grad("n"),
             get_grad("kf"),
             get_grad("ks"),
+            None,
             None,
             None,
             None,
@@ -630,6 +645,7 @@ class WarpStaticEngine:
                 self.wp_inertia,
                 self.wp_cog,
                 self.mass,
+                world_config.grid_center,
                 world_config.max_coord,
                 engine_config.dt,
                 num_steps,
@@ -658,6 +674,14 @@ class WarpStaticEngine:
         wp_ctrl_view = wp.from_torch(control_velocities.contiguous(), dtype=wp.vec3)
         wp.copy(self.static_controls[:num_steps], wp_ctrl_view)
 
+        # grid_center and max_coord are small tensors (2,), convert to wp.vec2
+        gc_wp = wp.vec2(
+            float(world_config.grid_center[0]), float(world_config.grid_center[1])
+        )
+        mc_wp = wp.vec2(
+            float(world_config.max_coord[0]), float(world_config.max_coord[1])
+        )
+
         wp.launch(
             kernel=simulate_trajectory_kernel,
             dim=self.batch_size,
@@ -676,7 +700,8 @@ class WarpStaticEngine:
                 self.cached_n,
                 self.cached_kf,
                 self.cached_ks,
-                world_config.max_coord,
+                gc_wp,
+                mc_wp,
                 engine_config.dt,
                 num_steps,
                 16,
