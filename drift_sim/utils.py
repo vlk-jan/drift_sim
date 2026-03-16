@@ -86,9 +86,9 @@ class WorldConfig(BaseConfig):
         )
 
         if self.side_range == (0.0, 0.0):
-            self.side_range = (-self.max_coord, self.max_coord)
+            self.side_range = (-self.max_coord[0], self.max_coord[0])
         if self.fwd_range == (0.0, 0.0):
-            self.fwd_range = (-self.max_coord, self.max_coord)
+            self.fwd_range = (-self.max_coord[1], self.max_coord[1])
 
         if not isinstance(self.k_friction, torch.Tensor):
             self.k_friction = torch.full_like(
@@ -129,9 +129,11 @@ class WorldConfig(BaseConfig):
         Return:
             Tuple[float, float]: center of the grid
         """
-        center_y = (self.fwd_range[0] + self.fwd_range[1]) / 2
-        center_x = (self.side_range[0] + self.side_range[1]) / 2
-        return torch.tensor((center_x, center_y))
+        center_y = (self.fwd_range[0] + self.fwd_range[1]) / 2.0
+        center_x = (self.side_range[0] + self.side_range[1]) / 2.0
+        return torch.tensor(
+            (center_x, center_y), dtype=torch.float32, device=self.z_grid.device
+        )
 
     def ij_to_xyz(
         self, ij: Union[torch.IntTensor, torch.LongTensor]
@@ -268,7 +270,7 @@ def find_init_rob_position(
 
     # --- 1. Get wheel XY positions assuming robot is at origin with 0 yaw ---
     # shape: (3, 3) -> (B, 3, 2)
-    grid_center = world_config.grid_center
+    grid_center = world_config.grid_center.to(device)
     wheel_centers = torch.as_tensor(
         robot_model.wheel_centers, device=device, dtype=torch.float32
     )
@@ -312,7 +314,7 @@ def find_init_rob_position(
     ny = n_ground[:, 1:2]
     nz = n_ground[:, 2:3].clamp_min(1e-6)
 
-    z_init = P0[:, 2] + (nx * P0[:, 0] + ny * P0[:, 1] + R) / nz
+    z_init = P0[:, 2:3] + (nx * P0[:, 0:1] + ny * P0[:, 1:2] + R) / nz
 
     # --- 6. Compute orientation aligning robot up-axis with terrain normal ---
     z_body = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
