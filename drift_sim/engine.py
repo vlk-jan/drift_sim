@@ -220,7 +220,7 @@ class DPhysicsEngine(torch.nn.Module):
         # Interpret wheel_omega as scalars around Y-axis (Robot Frame)
         # (B, 3) -> (B, 3, 3) vectors [0, w, 0]
         zeros = torch.zeros_like(state.wheel_omega)
-        omega_local = torch.stack([zeros, state.wheel_omega, zeros], dim=-1)
+        omega_local = torch.stack([zeros, state.wheel_omega, zeros], dim=-1).float()
         # Rotate to World Frame
         omega_world = (R.unsqueeze(1) @ omega_local.unsqueeze(-1)).squeeze(-1)
 
