@@ -3,10 +3,12 @@ from typing import Union
 import torch
 import torch.nn.functional as F
 
+from utils.geometry import quat_to_rotmat
+
 __all__ = [
+    "quat_to_rotmat",
     "unit_quaternion",
     "integrate_quaternion",
-    "quat_to_rotmat",
     "interpolate_grid",
     "interpolate_surface_normals_multi",
     "interpolate_surface_normals",
@@ -29,51 +31,6 @@ def unit_quaternion(
     q = torch.zeros(batch_size, 4, device=device)
     q[:, 0] = 1.0
     return q
-
-
-def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
-    """
-    Convert a quaternion into a rotation matrix.
-
-    Args:
-        q: (..., 4) quaternion in (w, x, y, z) format
-
-    Returns:
-        R: (..., 3, 3) rotation matrix
-    """
-    # Normalize the quaternion
-    q = F.normalize(q, dim=-1, eps=1e-6)
-
-    w, x, y, z = q.unbind(dim=-1)
-
-    # Precompute repeated terms
-    xx = x * x
-    yy = y * y
-    zz = z * z
-    xy = x * y
-    xz = x * z
-    yz = y * z
-    wx = w * x
-    wy = w * y
-    wz = w * z
-
-    # Build rotation matrix
-    R = torch.stack(
-        [
-            1 - 2 * (yy + zz),
-            2 * (xy - wz),
-            2 * (xz + wy),
-            2 * (xy + wz),
-            1 - 2 * (xx + zz),
-            2 * (yz - wx),
-            2 * (xz - wy),
-            2 * (yz + wx),
-            1 - 2 * (xx + yy),
-        ],
-        dim=-1,
-    )
-
-    return R.reshape(q.shape[:-1] + (3, 3))
 
 
 def integrate_quaternion(
@@ -141,14 +98,10 @@ def interpolate_grid(grid, xy, max_coord):
 
     # Apply sampling
     # grid: (B, 1, H_in, W_in)
-    # xy_norm: (B, W, P, 2) -> used as (B, H_out, W_out, 2) by grid_sample
-    out = torch.nn.functional.grid_sample(
-        grid,
-        xy_norm,
-        align_corners=True,
-    )
-    # out is (B, C, W, P). We assume C=1.
-    return out.permute(0, 2, 3, 1)
+    # xy_norm: (B, Wh, P, 2)
+    sampled = F.grid_sample(grid, xy_norm, mode="bilinear", align_corners=True)
+
+    return sampled.permute(0, 2, 3, 1)
 
 
 def interpolate_surface_normals_multi(grid_normals, query, max_coord):

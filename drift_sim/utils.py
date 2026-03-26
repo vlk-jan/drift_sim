@@ -346,3 +346,178 @@ def find_init_rob_position(
     x_init[:, 2] = z_init.squeeze(-1)
 
     return x_init, q_final
+
+
+def generate_controls(
+    duration,
+    dt,
+    num_robots,
+    device,
+    seed=42,
+    wheel_radius=0.4685,
+    current_vel_linear=1.0,
+    clamp=None,
+):
+    """
+    Generates random-walk angular wheel velocities.
+    """
+    torch.manual_seed(seed)
+    steps = int(duration / dt)
+    controls = []
+    timestamps = []
+
+    # Initial velocity (driving forward)
+    current_omega = current_vel_linear / wheel_radius
+
+    current_vel = torch.tensor(
+        [current_omega, current_omega, current_omega], device=device
+    )
+    current_vel = current_vel.unsqueeze(0).expand(num_robots, -1).clone()
+
+    for i in range(steps):
+        ts = i * dt
+        # Add small random noise to velocity
+        noise = (
+            torch.randn(num_robots, 3, device=device) * 0.05 * (1.0 / wheel_radius)
+        )  # Scale noise to angular
+
+        # Slowly vary the velocity (random walk)
+        current_vel += noise * dt
+
+        if clamp is not None:
+            current_vel = torch.clamp(current_vel, -clamp, clamp)
+
+        controls.append(current_vel.clone())
+        timestamps.append(ts)
+
+    return torch.stack(controls).permute(1, 0, 2), torch.tensor(
+        timestamps, device=device
+    ).expand(num_robots, -1)
+
+
+def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
+    """
+    Generates a sequence of dynamic maneuvers (Extended).
+    """
+    import numpy as np
+
+    torch.manual_seed(seed)
+    steps = int(duration / dt)
+    controls = []
+    timestamps = []
+
+    # Parameters for Helhest
+    wheel_radius = 0.4685
+    max_speed_lin = 5.0  # m/s
+    max_omega = max_speed_lin / wheel_radius
+
+    for i in range(steps):
+        ts = i * dt
+        progress = ts / duration
+
+        target_vel = torch.zeros(3, device=device, dtype=torch.float32)
+
+        if progress < 0.05:
+            # 0% - 5%: Warmup (Linear Accel)
+            frac = progress / 0.05
+            w = max_omega * frac
+            target_vel = torch.tensor([w, w, w], device=device, dtype=torch.float32)
+
+        elif progress < 0.15:
+            # 5% - 15%: Cruise (Fast Forward)
+            w = max_omega
+            target_vel = torch.tensor([w, w, w], device=device, dtype=torch.float32)
+
+        elif progress < 0.30:
+            # 15% - 30%: Slalom (S-Turns)
+            local_p = (progress - 0.15) / 0.15
+            w_base = max_omega * 0.7
+            w_diff = (max_omega * 0.6) * np.sin(local_p * 3 * 2 * np.pi)
+            target_vel = torch.tensor(
+                [w_base - w_diff, w_base + w_diff, w_base],
+                device=device,
+                dtype=torch.float32,
+            )
+
+        elif progress < 0.50:
+            # 30% - 50%: Square Path (Sharp Turns)
+            local_p = (progress - 0.30) / 0.20
+            segment = (local_p * 4) % 1.0  # 0.0 to 1.0 within a segment
+
+            if segment < 0.7:
+                # Drive Straight
+                w = max_omega * 0.8
+                target_vel = torch.tensor([w, w, w], device=device, dtype=torch.float32)
+            else:
+                # Hard Left Turn
+                w = max_omega
+                target_vel = torch.tensor(
+                    [w * 0.0, w, w * 0.5], device=device, dtype=torch.float32
+                )
+
+        elif progress < 0.60:
+            # 50% - 60%: Stop & Go
+            local_p = (progress - 0.50) / 0.10
+            if local_p < 0.4:
+                # Brake/Stop
+                target_vel = torch.tensor(
+                    [0.0, 0.0, 0.0], device=device, dtype=torch.float32
+                )
+            else:
+                # Hard Accel
+                w = max_omega
+                target_vel = torch.tensor([w, w, w], device=device, dtype=torch.float32)
+
+        elif progress < 0.75:
+            # 60% - 75%: Reverse Maneuvering
+            local_p = (progress - 0.60) / 0.15
+            w_base = -max_omega * 0.6
+            w_diff = (max_omega * 0.3) * np.sin(local_p * 2 * 2 * np.pi)
+            target_vel = torch.tensor(
+                [w_base + w_diff, w_base - w_diff, w_base],
+                device=device,
+                dtype=torch.float32,
+            )
+
+        elif progress < 0.85:
+            # 75% - 85%: Spins
+            local_p = (progress - 0.75) / 0.10
+            w_spin = max_omega * 0.8
+            if local_p < 0.5:
+                # Clockwise
+                target_vel = torch.tensor(
+                    [-w_spin, w_spin, 0.0], device=device, dtype=torch.float32
+                )
+            else:
+                # Counter-Clockwise
+                target_vel = torch.tensor(
+                    [w_spin, -w_spin, 0.0], device=device, dtype=torch.float32
+                )
+
+        elif progress < 0.95:
+            # 85% - 95%: Agility (Rapid Random Changes)
+            t_val = ts * 10.0
+            n1 = np.sin(t_val)
+            n2 = np.cos(t_val * 1.3)
+            w_base = max_omega * 0.8
+            w_l = w_base * (0.5 + 0.5 * n1)
+            w_r = w_base * (0.5 + 0.5 * n2)
+            w_rear = (w_l + w_r) / 2.0
+            target_vel = torch.tensor(
+                [w_l, w_r, w_rear], device=device, dtype=torch.float32
+            )
+
+        else:
+            # 95% - 100%: Cooldown / Stop
+            target_vel = torch.tensor(
+                [0.0, 0.0, 0.0], device=device, dtype=torch.float32
+            )
+
+        # Expand to batch
+        batch_vel = target_vel.unsqueeze(0).expand(num_robots, -1)
+        controls.append(batch_vel)
+        timestamps.append(ts)
+
+    return torch.stack(controls).permute(1, 0, 2), torch.tensor(
+        timestamps, device=device
+    ).expand(num_robots, -1)
