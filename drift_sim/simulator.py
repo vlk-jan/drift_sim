@@ -19,6 +19,10 @@ class Simulator(torch.nn.Module):
         device=None,
         T_horizon=5.0,
         dt=0.01,
+        res = 0.1,
+        max_coord = None,
+        side_range = None,
+        fwd_range = None,
     ):
         super().__init__()
 
@@ -51,6 +55,10 @@ class Simulator(torch.nn.Module):
         self.robot_model = robot_model
 
         engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
+        self.res = res
+        self.max_coord = max_coord
+        self.side_range = side_range
+        self.fwd_range = fwd_range
 
         self.batch_size = batch_size
         self.T_horizon = torch.tensor(T_horizon)
@@ -144,7 +152,8 @@ class Simulator(torch.nn.Module):
         properties : dict
             A dictionary containing terrain properties:
             - "geom": torch.Tensor of shape (B, H, W) representing heightmap.
-            - "friction": torch.Tensor of shape (B, H, W) or scalar representing friction coefficients.
+            - "friction": torch.Tensor of shape (B, H, W) or a scalar representing friction coefficients.
+            - "stiffness": torch.Tensor of shape (B, H, W) or a scalar representing stiffness coefficients. 
         vel_ctrl : torch.Tensor
             Control inputs for wheel velocities. Shape (B, Steps, 3) where 3 is the number of wheels.
         vel_ts : torch.Tensor
@@ -161,10 +170,10 @@ class Simulator(torch.nn.Module):
 
         world_config = WorldConfig(
             z_grid=properties["geom"],
-            grid_res=properties["res"],
-            max_coord=properties["max_coord"],
-            side_range=properties["side_range"],
-            fwd_range=properties["fwd_range"],
+            grid_res=self.res,
+            max_coord=self.max_coord,
+            side_range=self.side_range,
+            fwd_range=self.fwd_range,
             k_friction=properties["friction"],
             k_stiffness=properties["stiffness"],
         )
