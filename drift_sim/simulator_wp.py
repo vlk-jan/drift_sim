@@ -57,6 +57,23 @@ class Simulator(torch.nn.Module):
         MAX_STEPS = 100_000
         self.engine = WarpStaticEngine(robot_model, batch_size, MAX_STEPS, device)
         self.engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
+        self.res = None
+        self.max_coord = None
+        self.side_range = None
+        self.fwd_range = None
+
+    def update_world_config(
+        self, res=None, max_coord=None, side_range=None, fwd_range=None
+    ):
+        """Update the world configuration parameters."""
+        if res is not None:
+            self.res = res
+        if max_coord is not None:
+            self.max_coord = max_coord
+        if side_range is not None:
+            self.side_range = side_range
+        if fwd_range is not None:
+            self.fwd_range = fwd_range
 
     def predict_trajectory(self, properties, vel_ctrl, vel_ts):
         """
@@ -81,10 +98,10 @@ class Simulator(torch.nn.Module):
         # 1. Setup World
         world_config = WorldConfig(
             z_grid=properties["geom"],
-            grid_res=properties["res"],
-            max_coord=properties["max_coord"],
-            side_range=properties["side_range"],
-            fwd_range=properties["fwd_range"],
+            grid_res=self.res,
+            max_coord=self.max_coord,
+            side_range=self.side_range,
+            fwd_range=self.fwd_range,
             k_friction=properties["friction"],
             k_stiffness=properties["stiffness"],
         )

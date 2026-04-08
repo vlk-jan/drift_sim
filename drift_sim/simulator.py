@@ -19,10 +19,6 @@ class Simulator(torch.nn.Module):
         device=None,
         T_horizon=5.0,
         dt=0.01,
-        res = 0.1,
-        max_coord = None,
-        side_range = None,
-        fwd_range = None,
     ):
         super().__init__()
 
@@ -55,10 +51,10 @@ class Simulator(torch.nn.Module):
         self.robot_model = robot_model
 
         engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
-        self.res = res
-        self.max_coord = max_coord
-        self.side_range = side_range
-        self.fwd_range = fwd_range
+        self.res = None
+        self.max_coord = None
+        self.side_range = None
+        self.fwd_range = None
 
         self.batch_size = batch_size
         self.T_horizon = torch.tensor(T_horizon)
@@ -68,6 +64,19 @@ class Simulator(torch.nn.Module):
 
         self.engine = DPhysicsEngine(engine_config, robot_model, device)
         self.engine.eval()
+
+    def update_world_config(
+        self, res=None, max_coord=None, side_range=None, fwd_range=None
+    ):
+        """Update the world configuration parameters."""
+        if res is not None:
+            self.res = res
+        if max_coord is not None:
+            self.max_coord = max_coord
+        if side_range is not None:
+            self.side_range = side_range
+        if fwd_range is not None:
+            self.fwd_range = fwd_range
 
     def _prepare_inputs(self, vel_ctrl, vel_ts):
         """
@@ -153,7 +162,7 @@ class Simulator(torch.nn.Module):
             A dictionary containing terrain properties:
             - "geom": torch.Tensor of shape (B, H, W) representing heightmap.
             - "friction": torch.Tensor of shape (B, H, W) or a scalar representing friction coefficients.
-            - "stiffness": torch.Tensor of shape (B, H, W) or a scalar representing stiffness coefficients. 
+            - "stiffness": torch.Tensor of shape (B, H, W) or a scalar representing stiffness coefficients.
         vel_ctrl : torch.Tensor
             Control inputs for wheel velocities. Shape (B, Steps, 3) where 3 is the number of wheels.
         vel_ts : torch.Tensor
