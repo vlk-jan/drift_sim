@@ -17,7 +17,7 @@ class Simulator(torch.nn.Module):
         robot="helhest",
         batch_size=1,
         device=None,
-        T_horizon=5.0,
+        T_horizon=1.0,
         dt=0.01,
     ):
         super().__init__()
