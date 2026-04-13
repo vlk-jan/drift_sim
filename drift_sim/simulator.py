@@ -62,7 +62,8 @@ class Simulator(torch.nn.Module):
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
 
-        self.engine = DPhysicsEngine(engine_config, robot_model, device)
+        self.engine = DPhysicsEngine(engine_config, robot_model)
+        self.engine.to(device)
         self.engine.eval()
 
     def update_world_config(

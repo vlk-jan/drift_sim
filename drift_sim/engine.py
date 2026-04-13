@@ -29,38 +29,34 @@ class DPhysicsEngine(torch.nn.Module):
         self,
         config: PhysicsEngineConfig,
         robot_model: RobotModelConfig,
-        device: Union[torch.device, str],
     ):
         super().__init__()
         self.config = config
         self.robot_model = robot_model
-        self.device = device
-        self._F_g = torch.tensor(
-            [0.0, 0.0, -self.robot_model.mass * self.config.g],
-            device=self.device,
-            requires_grad=False,
-        ).unsqueeze(0)
         # Precompute relative wheel points
         self.register_buffer(
             "_wheel_pos_rel", self._precompute_wheel_points(n_points=16)
         )
-        # Cache robot model tensors on device to avoid per-step .to(device) calls
         self.register_buffer("_I_body", robot_model.inertia_tensor.float())
         self.register_buffer("_wheel_centers", robot_model.wheel_centers.float())
         self.register_buffer("_cog", robot_model.cog.float())
         self._mass = robot_model.mass
+        F_g = torch.tensor(
+            [0.0, 0.0, -self._mass * self.config.g],
+        ).unsqueeze(0)
+        self.register_buffer("_F_g", F_g)
 
     def _precompute_wheel_points(self, n_points: int = 16) -> torch.Tensor:
         """Precompute wheel points relative to wheel centers."""
         # [:-1] to remove endpoint to avoid duplicate points
-        theta = torch.linspace(0, 2 * torch.pi, n_points + 1, device=self.device)[:-1]
+        theta = torch.linspace(0, 2 * torch.pi, n_points + 1)[:-1]
         n_wheels = 3
 
         # radii: (3,)
-        wheel_radii = self.robot_model.wheel_radii.to(self.device)
+        wheel_radii = self.robot_model.wheel_radii
 
         # Shape (n_wheels, n_pts)
-        y = torch.zeros((n_wheels, n_points), device=self.device)
+        y = torch.zeros((n_wheels, n_points))
         x = wheel_radii[:, None] * torch.cos(theta)[None, :]
         z = -wheel_radii[:, None] * torch.sin(theta)[None, :]
 
