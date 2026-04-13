@@ -123,7 +123,13 @@ def get_wheel_point_local(i: int, total_points: int, radius: float):
 
 
 @wp.func
-def softplus_stable(x: float, beta: float):
+def softplus_stable(x: float, sigma: float):
+    """Soft contact force. If sigma <= 0.0, falls back to hard contact (ReLU)."""
+    if sigma <= 0.0:
+        if x > 0.0:
+            return x
+        return 0.0
+    beta = 1.0 / sigma
     threshold = 20.0
     xb = x * beta
     if xb > threshold:
@@ -176,6 +182,7 @@ def simulate_trajectory_kernel(
     gravity: float,
     damping_alpha: float,
     soft_contact_sigma: float,
+    ang_damping: float,
     torque_limit: float,
     out_x: wp.array(dtype=wp.vec3, ndim=2),
     out_q: wp.array(dtype=wp.quat, ndim=2),
@@ -282,8 +289,7 @@ def simulate_trajectory_kernel(
 
                     b_damp = damp_const * wp.sqrt(k_s)
                     f_raw = -k_s * dist - b_damp * vn
-                    beta = 1.0 / soft_contact_sigma
-                    f_mag = softplus_stable(f_raw, beta)
+                    f_mag = softplus_stable(f_raw, soft_contact_sigma)
 
                     f_mag = f_mag / contact_count_safe
                     F_spring = n_surf * f_mag
@@ -309,7 +315,6 @@ def simulate_trajectory_kernel(
                     T_total = T_total + tau_p
 
         # Integration
-        ang_damping = 0.1
         T_total = T_total - ang_damping * omega
         t_mag = length_safe(T_total)
         if t_mag > torque_limit:
@@ -357,6 +362,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         g,
         damping_alpha,
         soft_contact_sigma,
+        ang_damping,
         torque_limit,
         device_str,
     ):
@@ -446,6 +452,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                     g,
                     damping_alpha,
                     soft_contact_sigma,
+                    ang_damping,
                     torque_limit,
                 ],
                 outputs=[wp_out_x, wp_out_q],
@@ -507,21 +514,22 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             get_grad("n"),
             get_grad("kf"),
             get_grad("ks"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            None,  # wheel_centers_wp
+            None,  # wheel_radii_wp
+            None,  # inertia_wp
+            None,  # cog_wp
+            None,  # mass
+            None,  # grid_center_t
+            None,  # max_coord_t
+            None,  # dt
+            None,  # num_steps
+            None,  # num_wheel_points
+            None,  # g
+            None,  # damping_alpha
+            None,  # soft_contact_sigma
+            None,  # ang_damping
+            None,  # torque_limit
+            None,  # device_str
         )
 
 
@@ -653,8 +661,9 @@ class WarpStaticEngine:
                 engine_config.g,
                 engine_config.damping_alpha,
                 engine_config.soft_contact_sigma
-                if engine_config.soft_contact_sigma
-                else 0.01,
+                if engine_config.soft_contact_sigma is not None
+                else 0.0,
+                engine_config.ang_damping,
                 engine_config.torque_limit,
                 str(self.device),
             )
@@ -708,8 +717,9 @@ class WarpStaticEngine:
                 engine_config.g,
                 engine_config.damping_alpha,
                 engine_config.soft_contact_sigma
-                if engine_config.soft_contact_sigma
-                else 0.01,
+                if engine_config.soft_contact_sigma is not None
+                else 0.0,
+                engine_config.ang_damping,
                 engine_config.torque_limit,
             ],
             outputs=[self.static_out_x, self.static_out_q],
