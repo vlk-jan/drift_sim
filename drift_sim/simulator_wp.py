@@ -146,23 +146,10 @@ class Simulator(torch.nn.Module):
             state, dense_controls, world_config, self.engine_config
         )
 
-        # 5. Convert to Transformation Matrices
+        # 5. Convert to Absolute Pose Matrices
         # traj_q is now WXYZ (corrected by engine_wp), so quat_to_rotmat works
-        R = quat_to_rotmat(traj_q)
-
-        init_R = quat_to_rotmat(state.q).unsqueeze(0)
-        init_x = state.x.unsqueeze(0)
-
-        all_R = torch.cat([init_R, R], dim=0)
-        all_x = torch.cat([init_x, traj_x], dim=0)
-
-        R_prev = all_R[:-1]
-        R_curr = all_R[1:]
-        R_rel = R_prev.transpose(-1, -2) @ R_curr
-
-        x_prev = all_x[:-1]
-        x_curr = all_x[1:]
-        rel_trans = x_curr - x_prev
+        R = quat_to_rotmat(traj_q)  # (SimSteps, B, 3, 3)
+        x = traj_x  # (SimSteps, B, 3)
 
         # T is initially (SimSteps, B, 4, 4)
         T = (
@@ -170,8 +157,8 @@ class Simulator(torch.nn.Module):
             .view(1, 1, 4, 4)
             .repeat(num_steps, self.batch_size, 1, 1)
         )
-        T[:, :, :3, :3] = R_rel
-        T[:, :, :3, 3] = rel_trans
+        T[:, :, :3, :3] = R
+        T[:, :, :3, 3] = x
 
         # Permute to (B, SimSteps, 4, 4)
         T = T.permute(1, 0, 2, 3)
