@@ -206,7 +206,10 @@ class Simulator(torch.nn.Module):
         # Pre-allocate output tensors — avoids list-append + torch.stack overhead
         poses = torch.zeros(num_steps, self.batch_size, 4, 4, device=self.device)
         poses[:, :, 3, 3] = 1.0  # homogeneous coordinate
-        timestamps = torch.empty(num_steps, self.batch_size, device=self.device)
+        # Match dtype of vel_ts (double) so timestamp comparisons in trajectory_loss are exact
+        timestamps = torch.empty(
+            num_steps, self.batch_size, device=self.device, dtype=vel_ts.dtype
+        )
 
         ts = vel_ts[:, 0].clone()
 
