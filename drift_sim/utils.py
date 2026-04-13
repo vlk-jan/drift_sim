@@ -104,6 +104,18 @@ class WorldConfig(BaseConfig):
         else:
             self.k_stiffness = self.k_stiffness.to(torch.float32)
 
+        # Precompute a single 6-channel grid
+        # Channel layout: [z, nx, ny, nz, friction, stiffness]
+        self._sample_grid = torch.cat(
+            [
+                self.z_grid.unsqueeze(1),  # (B, 1, H, W)
+                self.normals,  # (B, 3, H, W)
+                self.k_friction.unsqueeze(1),  # (B, 1, H, W)
+                self.k_stiffness.unsqueeze(1),  # (B, 1, H, W)
+            ],
+            dim=1,
+        )  # (B, 6, H, W)
+
     def _compute_heightmap_gradients(self, z_grid: torch.Tensor) -> torch.Tensor:
         """
         Computes the gradients of a heightmap along the x and y axes using torch.gradient.

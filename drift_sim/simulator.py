@@ -201,19 +201,16 @@ class Simulator(torch.nn.Module):
         accels = d_vel / d_ts
 
         dt = self.engine.get_dt()
-        poses = []
-        timestamps = []
+        num_steps = vel_ts.shape[-1] - 1
 
-        # Initial pose
-        T_init = (
-            torch.eye(4, device=self.device).unsqueeze(0).repeat(self.batch_size, 1, 1)
-        )
-        T_init[:, :3, :3] = quat_to_rotmat(state.q)
-        T_init[:, :3, 3] = state.x
+        # Pre-allocate output tensors — avoids list-append + torch.stack overhead
+        poses = torch.zeros(num_steps, self.batch_size, 4, 4, device=self.device)
+        poses[:, :, 3, 3] = 1.0  # homogeneous coordinate
+        timestamps = torch.empty(num_steps, self.batch_size, device=self.device)
 
         ts = vel_ts[:, 0].clone()
 
-        for idx in range(vel_ts.shape[-1] - 1):
+        for idx in range(num_steps):
             # Update state wheel velocities to match interpolated input
             state.wheel_omega = vel_ctrl[:, idx]
 
@@ -224,20 +221,13 @@ class Simulator(torch.nn.Module):
             dstate = self.engine.forward(state, curr_acceleration, world_config)
             state = self.engine.update_state(state, dstate)
 
-            T = (
-                torch.eye(4, device=self.device)
-                .unsqueeze(0)
-                .repeat(self.batch_size, 1, 1)
-            )
-            T[:, :3, :3] = quat_to_rotmat(state.q)
-            T[:, :3, 3] = state.x
+            poses[idx, :, :3, :3] = quat_to_rotmat(state.q)
+            poses[idx, :, :3, 3] = state.x
+            timestamps[idx] = ts
 
-            poses.append(T)
-            timestamps.append(ts)
+            ts = ts + dt
 
-            ts += dt
-
-        poses = torch.stack(poses).permute(1, 0, 2, 3)
-        timestamps = torch.stack(timestamps).permute(1, 0)
+        poses = poses.permute(1, 0, 2, 3)  # (B, SimSteps, 4, 4)
+        timestamps = timestamps.permute(1, 0)  # (B, SimSteps)
 
         return poses, timestamps
