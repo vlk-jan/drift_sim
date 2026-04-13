@@ -176,9 +176,11 @@ class Simulator(torch.nn.Module):
         timestamps : torch.Tensor
             The timestamps for each simulation step. Shape (B, SimSteps).
         """
+        if "support" not in properties.keys():
+            properties["support"] = properties["geom"]
 
         world_config = WorldConfig(
-            z_grid=properties["geom"],
+            z_grid=properties["support"],
             grid_res=self.res,
             max_coord=self.max_coord,
             side_range=self.side_range,
