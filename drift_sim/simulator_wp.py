@@ -95,9 +95,12 @@ class Simulator(torch.nn.Module):
         timestamps : torch.Tensor
             Timestamps for each simulation step. Shape (B, SimSteps).
         """
+        if "support" not in properties.keys():
+            properties["support"] = properties["geom"]
+
         # 1. Setup World
         world_config = WorldConfig(
-            z_grid=properties["geom"],
+            z_grid=properties["support"],
             grid_res=self.res,
             max_coord=self.max_coord,
             side_range=self.side_range,
@@ -140,6 +143,7 @@ class Simulator(torch.nn.Module):
 
         # Dense VELOCITIES (Match PyTorch kinematic driving)
         dense_controls = v0 + (v1 - v0) * alpha  # (SimSteps, B, 3)
+        dense_controls = dense_controls.to(torch.float32)
 
         # 4. RUN SUPER KERNEL
         traj_x, traj_q = self.engine.run_trajectory(
