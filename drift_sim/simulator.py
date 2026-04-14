@@ -80,7 +80,7 @@ class Simulator(torch.nn.Module):
         if fwd_range is not None:
             self.fwd_range = fwd_range
 
-    def _prepare_inputs(self, vel_ctrl, vel_ts):
+    def _prepare_inputs(self, vel_ctrl, vel_ts, T_horizon=None):
         """
         Prepare control inputs for simulation. This may include resampling or interpolation such
         that each input has the same number of simulation steps and these steps align with the
@@ -92,6 +92,8 @@ class Simulator(torch.nn.Module):
             Control inputs for wheel velocities. Shape (B, Steps, 3).
         vel_ts : torch.Tensor
             Timestamps associated with the control inputs. Shape (B, Steps).
+        T_horizon : float or torch.Tensor, optional
+            Simulation horizon. Defaults to self.T_horizon.
 
         Returns
         -------
@@ -104,10 +106,13 @@ class Simulator(torch.nn.Module):
         device = vel_ctrl.device
         B, S = vel_ts.shape
 
+        if T_horizon is None:
+            T_horizon = self.T_horizon
+
         # 1. Define target timeline
         # Create target timestamps: [t_start, t_start + dt, ..., t_end]
         t_start = vel_ts[:, 0].unsqueeze(1)
-        num_steps = int(torch.ceil(self.T_horizon / dt).item()) + 1
+        num_steps = int(torch.ceil(T_horizon / dt).item()) + 1
         target_ts = t_start + (torch.arange(num_steps, device=device) * dt).unsqueeze(
             0
         ).expand(B, -1)
@@ -155,6 +160,7 @@ class Simulator(torch.nn.Module):
         vel_ctrl: torch.Tensor,
         vel_ts: torch.Tensor,
         initial_state: Optional[dict] = None,
+        T_horizon: Optional[float] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute a list of SO3 transformation matrices for the given wheel velocities.
@@ -171,7 +177,13 @@ class Simulator(torch.nn.Module):
         vel_ts : torch.Tensor
             Timestamps associated with the control inputs. Shape (B, Steps).
         initial_state : dict, optional
-            Initial state for the simulator. Can contain "xd", "omega", and "wheel_omega".
+            Initial state for the simulator. Can contain "x" (position, shape B×3),
+            "q" (quaternion [w,x,y,z], shape B×4), "xd", "omega", and "wheel_omega".
+            When "x" and "q" are provided they override the terrain-fitted initial pose,
+            enabling warm-starting from an arbitrary pose (e.g., a GT segment boundary).
+        T_horizon : float, optional
+            Simulation time horizon. Defaults to self.T_horizon. Pass a shorter value
+            when simulating a sub-segment of the full trajectory.
 
         Returns:
         -------
@@ -181,6 +193,8 @@ class Simulator(torch.nn.Module):
         timestamps : torch.Tensor
             The timestamps for each simulation step. Shape (B, SimSteps).
         """
+        actual_bs = vel_ctrl.shape[0]
+
         if "support" not in properties.keys():
             properties["support"] = properties["geom"]
 
@@ -193,12 +207,16 @@ class Simulator(torch.nn.Module):
             k_friction=properties["friction"],
             k_stiffness=properties["stiffness"],
         )
-        state = PhysicsState.dummy(batch_size=self.batch_size, device=self.device)
+        state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
         state.x, state.q = find_init_rob_position(
-            world_config, self.robot_model, self.batch_size, self.device
+            world_config, self.robot_model, actual_bs, self.device
         )
 
         if initial_state is not None:
+            if "x" in initial_state:
+                state.x = initial_state["x"].to(self.device)
+            if "q" in initial_state:
+                state.q = initial_state["q"].to(self.device)
             if "xd" in initial_state:
                 state.xd = initial_state["xd"].to(self.device)
             if "omega" in initial_state:
@@ -206,7 +224,7 @@ class Simulator(torch.nn.Module):
             if "wheel_omega" in initial_state:
                 state.wheel_omega = initial_state["wheel_omega"].to(self.device)
 
-        vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts)
+        vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts, T_horizon=T_horizon)
 
         # Precompute accelerations (B, SimSteps-1, 3)
         d_vel = vel_ctrl[:, 1:] - vel_ctrl[:, :-1]
@@ -217,11 +235,11 @@ class Simulator(torch.nn.Module):
         num_steps = vel_ts.shape[-1] - 1
 
         # Pre-allocate output tensors — avoids list-append + torch.stack overhead
-        poses = torch.zeros(num_steps, self.batch_size, 4, 4, device=self.device)
+        poses = torch.zeros(num_steps, actual_bs, 4, 4, device=self.device)
         poses[:, :, 3, 3] = 1.0  # homogeneous coordinate
         # Match dtype of vel_ts (double) so timestamp comparisons in trajectory_loss are exact
         timestamps = torch.empty(
-            num_steps, self.batch_size, device=self.device, dtype=vel_ts.dtype
+            num_steps, actual_bs, device=self.device, dtype=vel_ts.dtype
         )
 
         ts = vel_ts[:, 0].clone()
