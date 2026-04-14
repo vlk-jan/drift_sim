@@ -310,12 +310,14 @@ class DPhysicsEngine(torch.nn.Module):
         self, state: PhysicsState, dstate: PhysicsStateDer
     ) -> PhysicsState:
         """Integrate state for one timestep."""
-        # basic kinematics
-        next_xd = state.xd + dstate.xdd * self.config.dt
+        actual_bs = state.x.shape[0]
+
+        # translational kinematics
+        next_xd = (state.xd + dstate.xdd * self.config.dt).clamp(-50.0, 50.0)
         next_x = state.x + next_xd * self.config.dt
 
         # rotation kinematics
-        next_omega = state.omega + dstate.omega_d * self.config.dt
+        next_omega = (state.omega + dstate.omega_d * self.config.dt).clamp(-50.0, 50.0)
         next_q = integrate_quaternion(state.q, next_omega, self.config.dt)
         next_wheel_omega = state.wheel_omega + dstate.wheel_omega_d * self.config.dt
 
@@ -325,7 +327,7 @@ class DPhysicsEngine(torch.nn.Module):
             q=next_q,
             omega=next_omega,
             wheel_omega=next_wheel_omega,
-            batch_size=self.config.num_robots,
+            batch_size=actual_bs,
             device=state.device,
         )
 
