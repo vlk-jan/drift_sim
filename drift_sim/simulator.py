@@ -1,3 +1,4 @@
+from typing import Optional
 import torch
 
 from simulator.numerical import quat_to_rotmat
@@ -153,6 +154,7 @@ class Simulator(torch.nn.Module):
         properties: dict,
         vel_ctrl: torch.Tensor,
         vel_ts: torch.Tensor,
+        initial_state: Optional[dict] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute a list of SO3 transformation matrices for the given wheel velocities.
@@ -168,6 +170,8 @@ class Simulator(torch.nn.Module):
             Control inputs for wheel velocities. Shape (B, Steps, 3) where 3 is the number of wheels.
         vel_ts : torch.Tensor
             Timestamps associated with the control inputs. Shape (B, Steps).
+        initial_state : dict, optional
+            Initial state for the simulator. Can contain "xd", "omega", and "wheel_omega".
 
         Returns:
         -------
@@ -193,6 +197,14 @@ class Simulator(torch.nn.Module):
         state.x, state.q = find_init_rob_position(
             world_config, self.robot_model, self.batch_size, self.device
         )
+
+        if initial_state is not None:
+            if "xd" in initial_state:
+                state.xd = initial_state["xd"].to(self.device)
+            if "omega" in initial_state:
+                state.omega = initial_state["omega"].to(self.device)
+            if "wheel_omega" in initial_state:
+                state.wheel_omega = initial_state["wheel_omega"].to(self.device)
 
         vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts)
 
