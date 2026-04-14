@@ -572,49 +572,6 @@ class WarpStaticEngine:
             (max_steps, batch_size), dtype=wp.quat, device=self.device
         )
 
-        self.cached_z = None
-        self.cached_n = None
-        self.cached_kf = None
-        self.cached_ks = None
-
-    def _update_world_cache(self, world_config):
-        if self.cached_z is None:
-            z_t = world_config.z_grid[0]
-            self.cached_z = wp.from_torch(
-                z_t, dtype=wp.float32, requires_grad=z_t.requires_grad
-            )
-
-            n_t = world_config.normals[0].permute(1, 2, 0).contiguous()
-            self.cached_n = wp.from_torch(
-                n_t, dtype=wp.vec3, requires_grad=n_t.requires_grad
-            )
-
-            if isinstance(world_config.k_friction, torch.Tensor):
-                kf_t = world_config.k_friction[0]
-                self.cached_kf = wp.from_torch(
-                    kf_t, dtype=wp.float32, requires_grad=kf_t.requires_grad
-                )
-            else:
-                fric_t = torch.full_like(
-                    world_config.z_grid[0], world_config.k_friction
-                )
-                self.cached_kf = wp.from_torch(
-                    fric_t, dtype=wp.float32, requires_grad=False
-                )
-
-            if isinstance(world_config.k_stiffness, torch.Tensor):
-                ks_t = world_config.k_stiffness[0]
-                self.cached_ks = wp.from_torch(
-                    ks_t, dtype=wp.float32, requires_grad=ks_t.requires_grad
-                )
-            else:
-                stiff_t = torch.full_like(
-                    world_config.z_grid[0], world_config.k_stiffness
-                )
-                self.cached_ks = wp.from_torch(
-                    stiff_t, dtype=wp.float32, requires_grad=False
-                )
-
     def run_trajectory(
         self, init_state, control_velocities, world_config, engine_config
     ):
@@ -672,8 +629,6 @@ class WarpStaticEngine:
         if num_steps > self.max_steps:
             raise ValueError(f"Steps {num_steps} > Max Allocated {self.max_steps}")
 
-        self._update_world_cache(world_config)
-
         # Copy State
         wp.copy(self.static_x, wp.from_torch(init_state.x, dtype=wp.vec3))
         q_xyzw = init_state.q[:, [1, 2, 3, 0]].contiguous()
@@ -683,6 +638,17 @@ class WarpStaticEngine:
 
         wp_ctrl_view = wp.from_torch(control_velocities.contiguous(), dtype=wp.vec3)
         wp.copy(self.static_controls[:num_steps], wp_ctrl_view)
+
+        # Build terrain Warp arrays fresh from the current world_config each call.
+        # Do NOT cache: different calls may have different terrains (e.g. training batches).
+        z_t = world_config.z_grid[0].contiguous()
+        n_t = world_config.normals[0].permute(1, 2, 0).contiguous()
+        kf_t = world_config.k_friction[0].contiguous()
+        ks_t = world_config.k_stiffness[0].contiguous()
+        wp_z = wp.from_torch(z_t, dtype=wp.float32)
+        wp_n = wp.from_torch(n_t, dtype=wp.vec3)
+        wp_kf = wp.from_torch(kf_t, dtype=wp.float32)
+        wp_ks = wp.from_torch(ks_t, dtype=wp.float32)
 
         # grid_center and max_coord are small tensors (2,), convert to wp.vec2
         gc_wp = wp.vec2(
@@ -706,10 +672,10 @@ class WarpStaticEngine:
                 self.wp_inertia,
                 self.wp_cog,
                 self.mass,
-                self.cached_z,
-                self.cached_n,
-                self.cached_kf,
-                self.cached_ks,
+                wp_z,
+                wp_n,
+                wp_kf,
+                wp_ks,
                 gc_wp,
                 mc_wp,
                 engine_config.dt,
