@@ -281,8 +281,9 @@ def simulate_trajectory_kernel(
                     # Physics
                     r_w_c = p_world - w_center_world
                     r_com_p = p_world - com_world
+                    r_body_p = p_world - x
 
-                    v_rigid = xd + wp.cross(omega, r_com_p)
+                    v_rigid = xd + wp.cross(omega, r_body_p)
                     v_spin = wp.cross(w_vec_world, r_w_c)
                     v_total = v_rigid + v_spin
                     vn = wp.dot(v_total, n_surf)
