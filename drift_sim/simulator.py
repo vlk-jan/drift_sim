@@ -108,6 +108,8 @@ class Simulator(torch.nn.Module):
 
         if T_horizon is None:
             T_horizon = self.T_horizon
+        if type(T_horizon) is float:
+            T_horizon = torch.tensor(T_horizon, device=device)
 
         # 1. Define target timeline
         # Create target timestamps: [t_start, t_start + dt, ..., t_end]

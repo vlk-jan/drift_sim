@@ -261,8 +261,8 @@ class DPhysicsEngine(torch.nn.Module):
         F_net_wheels = F_springs - Fs_fric
 
         # Total Force (World Frame)
-        # F_grav: (B, 3)
-        F_grav_batch = self._F_g.expand(self.config.num_robots, -1)
+        # F_grav: (B, 3) — expand to actual batch size, not the static config value
+        F_grav_batch = self._F_g.expand(R.shape[0], -1)
         # Sum over wheels (dim 1) and points (dim 2)
         F_net_world = F_grav_batch + F_net_wheels.sum(dim=(1, 2))
 
