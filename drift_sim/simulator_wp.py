@@ -98,6 +98,10 @@ class Simulator(torch.nn.Module):
             Relative robot motion. Shape (B, SimSteps, 4, 4).
         timestamps : torch.Tensor
             Timestamps for each simulation step. Shape (B, SimSteps).
+        xd_out : torch.Tensor
+            Linear velocity output. Shape (B, SimSteps, 3).
+        omega_out : torch.Tensor
+            Angular velocity output. Shape (B, SimSteps, 3).
         """
         if "support" not in properties.keys():
             properties["support"] = properties["height_map"]
@@ -114,9 +118,10 @@ class Simulator(torch.nn.Module):
         )
 
         # 2. Setup Initial State
-        state = PhysicsState.dummy(batch_size=self.batch_size, device=self.device)
+        actual_bs = vel_ctrl.shape[0]
+        state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
         state.x, state.q = find_init_rob_position(
-            world_config, self.robot_model, self.batch_size, self.device
+            world_config, self.robot_model, actual_bs, self.device
         )
 
         if initial_state is not None:
@@ -128,6 +133,7 @@ class Simulator(torch.nn.Module):
                 state.wheel_omega = initial_state["wheel_omega"].to(self.device)
 
         # 3. Interpolate Controls
+        actual_bs = vel_ctrl.shape[0]
         ref_ts = vel_ts[0]  # (Steps,)
 
         # Permute vel_ctrl to (Steps, B, 3) for efficient indexing
@@ -158,7 +164,7 @@ class Simulator(torch.nn.Module):
         dense_controls = dense_controls.to(torch.float32)
 
         # 4. RUN SUPER KERNEL
-        traj_x, traj_q = self.engine.run_trajectory(
+        traj_x, traj_q, traj_xd, traj_omega = self.engine.run_trajectory(
             state, dense_controls, world_config, self.engine_config
         )
 
@@ -171,15 +177,17 @@ class Simulator(torch.nn.Module):
         T = (
             torch.eye(4, device=self.device)
             .view(1, 1, 4, 4)
-            .repeat(num_steps, self.batch_size, 1, 1)
+            .repeat(num_steps, actual_bs, 1, 1)
         )
         T[:, :, :3, :3] = R
         T[:, :, :3, 3] = x
 
         # Permute to (B, SimSteps, 4, 4)
         T = T.permute(1, 0, 2, 3)
+        xd_out = traj_xd.permute(1, 0, 2)  # (B, SimSteps, 3)
+        omega_out = traj_omega.permute(1, 0, 2)  # (B, SimSteps, 3)
 
         # Expand timestamps to (B, SimSteps)
-        query_times_batch = query_times.unsqueeze(0).expand(self.batch_size, -1)
+        query_times_batch = query_times.unsqueeze(0).expand(actual_bs, -1)
 
-        return T, query_times_batch
+        return T, query_times_batch, xd_out, omega_out

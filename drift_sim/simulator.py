@@ -161,7 +161,7 @@ class Simulator(torch.nn.Module):
         vel_ts: torch.Tensor,
         initial_state: Optional[dict] = None,
         T_horizon: Optional[float] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Compute a list of SO3 transformation matrices for the given wheel velocities.
 
@@ -234,9 +234,15 @@ class Simulator(torch.nn.Module):
         dt = self.engine.get_dt()
         num_steps = vel_ts.shape[-1] - 1
 
-        # Pre-allocate output tensors — avoids list-append + torch.stack overhead
-        poses = torch.zeros(num_steps, actual_bs, 4, 4, device=self.device)
-        poses[:, :, 3, 3] = 1.0  # homogeneous coordinate
+        poses = torch.empty(
+            num_steps, actual_bs, 4, 4, device=self.device, dtype=torch.float32
+        )
+        xd_out = torch.empty(
+            num_steps, actual_bs, 3, device=self.device, dtype=torch.float32
+        )
+        omega_out = torch.empty(
+            num_steps, actual_bs, 3, device=self.device, dtype=torch.float32
+        )
         # Match dtype of vel_ts (double) so timestamp comparisons in trajectory_loss are exact
         timestamps = torch.empty(
             num_steps, actual_bs, device=self.device, dtype=vel_ts.dtype
@@ -257,11 +263,15 @@ class Simulator(torch.nn.Module):
 
             poses[idx, :, :3, :3] = quat_to_rotmat(state.q)
             poses[idx, :, :3, 3] = state.x
+            xd_out[idx] = state.xd
+            omega_out[idx] = state.omega
             timestamps[idx] = ts
 
             ts = ts + dt
 
         poses = poses.permute(1, 0, 2, 3)  # (B, SimSteps, 4, 4)
+        xd_out = xd_out.permute(1, 0, 2)  # (B, SimSteps, 3)
+        omega_out = omega_out.permute(1, 0, 2)  # (B, SimSteps, 3)
         timestamps = timestamps.permute(1, 0)  # (B, SimSteps)
 
-        return poses, timestamps
+        return poses, timestamps, xd_out, omega_out

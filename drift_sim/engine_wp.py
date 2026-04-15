@@ -186,6 +186,8 @@ def simulate_trajectory_kernel(
     torque_limit: float,
     out_x: wp.array(dtype=wp.vec3, ndim=2),
     out_q: wp.array(dtype=wp.quat, ndim=2),
+    out_xd: wp.array(dtype=wp.vec3, ndim=2),
+    out_omega: wp.array(dtype=wp.vec3, ndim=2),
 ):
     tid = wp.tid()
 
@@ -332,6 +334,8 @@ def simulate_trajectory_kernel(
 
         out_x[step, tid] = x
         out_q[step, tid] = q
+        out_xd[step, tid] = xd
+        out_omega[step, tid] = omega
 
 
 # -----------------------------------------------------------------------------
@@ -424,6 +428,12 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         wp_out_q = wp.zeros(
             (num_steps, B), dtype=wp.quat, device=device, requires_grad=True
         )
+        wp_out_xd = wp.zeros(
+            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=False
+        )
+        wp_out_omega = wp.zeros(
+            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=False
+        )
 
         ctx.tape = wp.Tape()
         with ctx.tape:
@@ -456,7 +466,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                     ang_damping,
                     torque_limit,
                 ],
-                outputs=[wp_out_x, wp_out_q],
+                outputs=[wp_out_x, wp_out_q, wp_out_xd, wp_out_omega],
                 device=device,
             )
 
@@ -471,16 +481,21 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             "kf": wp_kf,
             "ks": wp_ks,
         }
-        ctx.wp_outputs = [wp_out_x, wp_out_q]
+        ctx.wp_outputs = [wp_out_x, wp_out_q, wp_out_xd, wp_out_omega]
 
         # Permute Output Quaternion XYZW -> WXYZ
         out_q_xyzw = wp.to_torch(wp_out_q)
         out_q_wxyz = out_q_xyzw[:, :, [3, 0, 1, 2]]
 
-        return wp.to_torch(wp_out_x), out_q_wxyz
+        return (
+            wp.to_torch(wp_out_x),
+            out_q_wxyz,
+            wp.to_torch(wp_out_xd),
+            wp.to_torch(wp_out_omega),
+        )
 
     @staticmethod
-    def backward(ctx, grad_out_x, grad_out_q):
+    def backward(ctx, grad_out_x, grad_out_q, grad_out_xd, grad_out_omega):
         grads = {}
         if grad_out_x is not None:
             grads[ctx.wp_outputs[0]] = wp.from_torch(
@@ -490,6 +505,10 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             # WXYZ -> XYZW
             grad_q_xyzw = grad_out_q[..., [1, 2, 3, 0]].contiguous()
             grads[ctx.wp_outputs[1]] = wp.from_torch(grad_q_xyzw, dtype=wp.quat)
+        
+        # We don't propagate gradients through velocity outputs as they are mostly for detection
+        # but Warp Tape might expect entries if we listed them in outputs.
+        # If grad_out_xd/omega are not None, we could add them, but here we assume requires_grad=False for them.
 
         ctx.tape.backward(grads=grads)
 
@@ -570,6 +589,12 @@ class WarpStaticEngine:
         )
         self.static_out_q = wp.zeros(
             (max_steps, batch_size), dtype=wp.quat, device=self.device
+        )
+        self.static_out_xd = wp.zeros(
+            (max_steps, batch_size), dtype=wp.vec3, device=self.device
+        )
+        self.static_out_omega = wp.zeros(
+            (max_steps, batch_size), dtype=wp.vec3, device=self.device
         )
 
     def run_trajectory(
@@ -689,12 +714,19 @@ class WarpStaticEngine:
                 engine_config.ang_damping,
                 engine_config.torque_limit,
             ],
-            outputs=[self.static_out_x, self.static_out_q],
+            outputs=[
+                self.static_out_x,
+                self.static_out_q,
+                self.static_out_xd,
+                self.static_out_omega,
+            ],
             device=self.device,
         )
 
         out_x = wp.to_torch(self.static_out_x)[:num_steps]
         out_q_xyzw = wp.to_torch(self.static_out_q)[:num_steps]
         out_q_wxyz = out_q_xyzw[..., [3, 0, 1, 2]]
+        out_xd = wp.to_torch(self.static_out_xd)[:num_steps]
+        out_omega = wp.to_torch(self.static_out_omega)[:num_steps]
 
-        return out_x, out_q_wxyz
+        return out_x, out_q_wxyz, out_xd, out_omega
