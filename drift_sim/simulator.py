@@ -51,7 +51,7 @@ class Simulator(torch.nn.Module):
 
         self.robot_model = robot_model
 
-        engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
+        engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt, soft_contact_sigma=0.01)
         self.res = None
         self.max_coord = None
         self.side_range = None
