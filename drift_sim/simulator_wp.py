@@ -100,7 +100,7 @@ class Simulator(torch.nn.Module):
             Timestamps for each simulation step. Shape (B, SimSteps).
         """
         if "support" not in properties.keys():
-            properties["support"] = properties["geom"]
+            properties["support"] = properties["height_map"]
 
         # 1. Setup World
         world_config = WorldConfig(

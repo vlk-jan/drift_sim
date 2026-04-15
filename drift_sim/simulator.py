@@ -169,7 +169,7 @@ class Simulator(torch.nn.Module):
         ----------
         properties : dict
             A dictionary containing terrain properties:
-            - "geom": torch.Tensor of shape (B, H, W) representing heightmap.
+            - "height_map": torch.Tensor of shape (B, H, W) representing heightmap (used as fallback when "support" is absent).
             - "friction": torch.Tensor of shape (B, H, W) or a scalar representing friction coefficients.
             - "stiffness": torch.Tensor of shape (B, H, W) or a scalar representing stiffness coefficients.
         vel_ctrl : torch.Tensor
@@ -196,7 +196,7 @@ class Simulator(torch.nn.Module):
         actual_bs = vel_ctrl.shape[0]
 
         if "support" not in properties.keys():
-            properties["support"] = properties["geom"]
+            properties["support"] = properties["height_map"]
 
         world_config = WorldConfig(
             z_grid=properties["support"],
