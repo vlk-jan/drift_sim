@@ -104,9 +104,6 @@ class Simulator(torch.nn.Module):
         omega_out : torch.Tensor
             Angular velocity output. Shape (B, SimSteps, 3).
         """
-        if "support" not in properties.keys():
-            properties["support"] = properties["height_map"]
-
         # 1. Setup World
         world_config = WorldConfig(
             z_grid=properties["support"],
