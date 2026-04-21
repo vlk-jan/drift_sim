@@ -233,44 +233,41 @@ class Simulator(torch.nn.Module):
         dt = self.engine.get_dt()
         num_steps = vel_ts.shape[-1] - 1
 
-        poses = torch.empty(
-            num_steps, actual_bs, 4, 4, device=self.device, dtype=torch.float32
-        )
-        xd_out = torch.empty(
-            num_steps, actual_bs, 3, device=self.device, dtype=torch.float32
-        )
-        omega_out = torch.empty(
-            num_steps, actual_bs, 3, device=self.device, dtype=torch.float32
-        )
-        # Match dtype of vel_ts (double) so timestamp comparisons in trajectory_loss are exact
-        timestamps = torch.empty(
-            num_steps, actual_bs, device=self.device, dtype=vel_ts.dtype
-        )
+        # Pre-allocate using Python lists to maintain gradients
+        poses_list = []
+        xd_out_list = []
+        omega_out_list = []
+        timestamps_list = []
 
         ts = vel_ts[:, 0].clone()
+        bottom_row = torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], device=self.device).repeat(actual_bs, 1, 1)
 
         for idx in range(num_steps):
             # Update state wheel velocities to match interpolated input
             state.wheel_omega = vel_ctrl[:, idx]
-
-            # Use precomputed acceleration
             curr_acceleration = accels[:, idx]
 
             # Forward with acceleration control
             dstate = self.engine.forward(state, curr_acceleration, world_config)
             state = self.engine.update_state(state, dstate)
 
-            poses[idx, :, :3, :3] = quat_to_rotmat(state.q)
-            poses[idx, :, :3, 3] = state.x
-            xd_out[idx] = state.xd
-            omega_out[idx] = state.omega
-            timestamps[idx] = ts
+            # Construct the SE(3) pose matrix differentiably
+            R = quat_to_rotmat(state.q)            # (B, 3, 3)
+            t = state.x.unsqueeze(-1)              # (B, 3, 1)
+            top = torch.cat([R, t], dim=2)         # (B, 3, 4)
+            pose = torch.cat([top, bottom_row], dim=1) # (B, 4, 4)
+
+            poses_list.append(pose)
+            xd_out_list.append(state.xd)
+            omega_out_list.append(state.omega)
+            timestamps_list.append(ts)
 
             ts = ts + dt
 
-        poses = poses.permute(1, 0, 2, 3)  # (B, SimSteps, 4, 4)
-        xd_out = xd_out.permute(1, 0, 2)  # (B, SimSteps, 3)
-        omega_out = omega_out.permute(1, 0, 2)  # (B, SimSteps, 3)
-        timestamps = timestamps.permute(1, 0)  # (B, SimSteps)
+        # Stack into final tensors
+        poses = torch.stack(poses_list, dim=1)           # (B, SimSteps, 4, 4)
+        xd_out = torch.stack(xd_out_list, dim=1)         # (B, SimSteps, 3)
+        omega_out = torch.stack(omega_out_list, dim=1)   # (B, SimSteps, 3)
+        timestamps = torch.stack(timestamps_list, dim=1) # (B, SimSteps)
 
         return poses, timestamps, xd_out, omega_out
