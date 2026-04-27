@@ -233,41 +233,44 @@ class Simulator(torch.nn.Module):
         dt = self.engine.get_dt()
         num_steps = vel_ts.shape[-1] - 1
 
-        # Pre-allocate using Python lists to maintain gradients
-        poses_list = []
+        # Collect per-step outputs as lists (preserves gradient graph through stack)
+        R_list = []
+        t_list = []
         xd_out_list = []
         omega_out_list = []
         timestamps_list = []
 
         ts = vel_ts[:, 0].clone()
-        bottom_row = torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], device=self.device).repeat(actual_bs, 1, 1)
 
         for idx in range(num_steps):
-            # Update state wheel velocities to match interpolated input
             state.wheel_omega = vel_ctrl[:, idx]
             curr_acceleration = accels[:, idx]
 
-            # Forward with acceleration control
             dstate = self.engine.forward(state, curr_acceleration, world_config)
             state = self.engine.update_state(state, dstate)
 
-            # Construct the SE(3) pose matrix differentiably
-            R = quat_to_rotmat(state.q)            # (B, 3, 3)
-            t = state.x.unsqueeze(-1)              # (B, 3, 1)
-            top = torch.cat([R, t], dim=2)         # (B, 3, 4)
-            pose = torch.cat([top, bottom_row], dim=1) # (B, 4, 4)
-
-            poses_list.append(pose)
+            R_list.append(quat_to_rotmat(state.q))  # (B, 3, 3)
+            t_list.append(state.x)                   # (B, 3)
             xd_out_list.append(state.xd)
             omega_out_list.append(state.omega)
             timestamps_list.append(ts)
 
             ts = ts + dt
 
-        # Stack into final tensors
-        poses = torch.stack(poses_list, dim=1)           # (B, SimSteps, 4, 4)
-        xd_out = torch.stack(xd_out_list, dim=1)         # (B, SimSteps, 3)
-        omega_out = torch.stack(omega_out_list, dim=1)   # (B, SimSteps, 3)
+        # Build final tensors — SE(3) construction done once outside the loop
+        R_all = torch.stack(R_list, dim=1)           # (B, SimSteps, 3, 3)
+        t_all = torch.stack(t_list, dim=1)           # (B, SimSteps, 3)
+        top_part = torch.cat(
+            [R_all, t_all.unsqueeze(-1)], dim=-1
+        )                                            # (B, SimSteps, 3, 4)
+        bottom = torch.zeros(
+            actual_bs, num_steps, 1, 4, device=self.device
+        )
+        bottom[:, :, 0, 3] = 1.0
+        poses = torch.cat([top_part, bottom], dim=2) # (B, SimSteps, 4, 4)
+
+        xd_out = torch.stack(xd_out_list, dim=1)     # (B, SimSteps, 3)
+        omega_out = torch.stack(omega_out_list, dim=1)# (B, SimSteps, 3)
         timestamps = torch.stack(timestamps_list, dim=1) # (B, SimSteps)
 
         return poses, timestamps, xd_out, omega_out
