@@ -236,10 +236,17 @@ class DPhysicsEngine(torch.nn.Module):
         F_N = norms_spring.clamp_min(1e-9)
 
         # F_fric = mu * F_N * tanh(v_rel)
-        # vels_wheel_contact is absolute velocity of contact point (ground is static)
-        # Refined friction model: direction based on velocity vector, magnitude based on speed
-        v_mag = torch.norm(vels_wheel_contact, dim=-1, keepdim=True)
-        v_dir = vels_wheel_contact / (v_mag + 1e-6)
+        # Friction is a tangential force — project contact velocity onto the terrain surface
+        # plane before computing direction and magnitude.  Using the full 3D velocity would
+        # inject a spurious normal component: when the body has a downward z-velocity,
+        # v_dir[z] < 0, so Fs_fric[z] < 0, and F_net[z] = F_spring[z] - Fs_fric[z] gains
+        # an unphysical extra-upward term that can launch the robot off the terrain.
+        v_normal_comp = (vels_wheel_contact * normals).sum(
+            dim=-1, keepdim=True
+        ) * normals
+        v_tangential = vels_wheel_contact - v_normal_comp  # (B, W, P, 3)
+        v_mag = torch.norm(v_tangential, dim=-1, keepdim=True)
+        v_dir = v_tangential / (v_mag + 1e-6)
 
         # F_c_raw_mag = mu * F_N * tanh(v)
         F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag)

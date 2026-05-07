@@ -297,8 +297,11 @@ def simulate_trajectory_kernel(
                     f_mag = f_mag / contact_count_safe
                     F_spring = n_surf * f_mag
 
-                    v_mag = length_safe(v_total)
-                    v_dir = v_total / (v_mag + 1.0e-6)
+                    # Friction is tangential: remove the normal component of v_total
+                    # before computing direction and magnitude (same fix as engine.py).
+                    v_tangential = v_total - vn * n_surf
+                    v_mag = length_safe(v_tangential)
+                    v_dir = v_tangential / (v_mag + 1.0e-6)
                     F_N = wp.dot(F_spring, n_surf)
                     if F_N < 0.0:
                         F_N = 0.0
@@ -505,7 +508,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             # WXYZ -> XYZW
             grad_q_xyzw = grad_out_q[..., [1, 2, 3, 0]].contiguous()
             grads[ctx.wp_outputs[1]] = wp.from_torch(grad_q_xyzw, dtype=wp.quat)
-        
+
         # We don't propagate gradients through velocity outputs as they are mostly for detection
         # but Warp Tape might expect entries if we listed them in outputs.
         # If grad_out_xd/omega are not None, we could add them, but here we assume requires_grad=False for them.
