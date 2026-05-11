@@ -223,6 +223,19 @@ class Simulator(torch.nn.Module):
             if "wheel_omega" in initial_state:
                 state.wheel_omega = initial_state["wheel_omega"].to(self.device)
 
+        # Raise the robot until all wheel circumference sample points clear the terrain.
+        # find_init_rob_position only ensures the wheel-triangle plane is tangent; on
+        # sloped/curved terrain the 16 circumference sample points per wheel can penetrate,
+        # producing enormous initial spring forces that launch the robot upward at t=0.
+        with torch.no_grad():
+            R_body = quat_to_rotmat(state.q)  # (B, 3, 3)
+            wc_world = (R_body @ self.engine._wheel_centers.T).transpose(-1, -2) + state.x.unsqueeze(1)  # (B, W, 3)
+            wp_rel = torch.einsum("bij,wpj->bwpi", R_body, self.engine._wheel_pos_rel)  # (B, W, P, 3)
+            wp_world = wp_rel + wc_world.unsqueeze(2)  # (B, W, P, 3)
+            dh, _, _, _ = self.engine._sample_terrain(wp_world, world_config)  # (B, W, P, 1)
+            max_pen = (-dh.reshape(actual_bs, -1)).clamp(min=0).max(dim=1).values  # (B,)
+            state.x[:, 2] += max_pen
+
         vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts, T_horizon=T_horizon)
 
         # Precompute accelerations (B, SimSteps-1, 3)
