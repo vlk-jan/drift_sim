@@ -249,7 +249,7 @@ def simulate_trajectory_kernel(
             contact_count_safe = 1.0
 
         # Pre-calculate damping constant
-        damp_const = damping_alpha * 2.0 * wp.sqrt(mass / contact_count_safe)
+        damp_const = damping_alpha * 2.0 * wp.sqrt(mass)
         com_world = x + wp.quat_rotate(q, cog_val)
 
         # ---------------------------------------------------------------------

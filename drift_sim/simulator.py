@@ -19,7 +19,7 @@ class Simulator(torch.nn.Module):
         batch_size=1,
         device=None,
         T_horizon=1.0,
-        dt=0.01,
+        dt=0.001,
     ):
         super().__init__()
 
@@ -51,7 +51,9 @@ class Simulator(torch.nn.Module):
 
         self.robot_model = robot_model
 
-        engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt, soft_contact_sigma=0.01)
+        engine_config = PhysicsEngineConfig(
+            num_robots=batch_size, dt=dt, soft_contact_sigma=0.01
+        )
         self.res = None
         self.max_coord = None
         self.side_range = None
@@ -223,6 +225,40 @@ class Simulator(torch.nn.Module):
             if "wheel_omega" in initial_state:
                 state.wheel_omega = initial_state["wheel_omega"].to(self.device)
 
+        # Raise the robot until all wheel circumference sample points clear the terrain.
+        # find_init_rob_position only ensures the wheel-triangle plane is tangent; on
+        # sloped/curved terrain the 16 circumference sample points per wheel can penetrate,
+        # producing enormous initial spring forces that launch the robot upward at t=0.
+        with torch.no_grad():
+            R_body = quat_to_rotmat(state.q)  # (B, 3, 3)
+            wc_world = (R_body @ self.engine._wheel_centers.T).transpose(
+                -1, -2
+            ) + state.x.unsqueeze(1)  # (B, W, 3)
+            wp_rel = torch.einsum(
+                "bij,wpj->bwpi", R_body, self.engine._wheel_pos_rel
+            )  # (B, W, P, 3)
+            wp_world = wp_rel + wc_world.unsqueeze(2)  # (B, W, P, 3)
+            # Iteratively raise the robot until all wheel circumference sample points clear
+            # the terrain. Each step applies -dh (vertical penetration depth), which removes
+            # fraction nz of the true geometric penetration per iteration — so convergence is
+            # geometric. The direct -dh/nz formula would be exact in one step but amplifies
+            # tiny dh at near-vertical faces (nz≈0) into a huge over-lift. 5 iterations
+            # give <3% residual even on 60° slopes while never over-shooting.
+            for _ in range(5):
+                dh, _, _, _ = self.engine._sample_terrain(
+                    wp_world, world_config
+                )  # (B, W, P, 1)
+                max_pen = (
+                    (-dh.reshape(actual_bs, -1)).clamp(min=0).max(dim=1).values
+                )  # (B,)
+                if (max_pen < 1e-5).all():
+                    break
+                state.x[:, 2] += max_pen
+                wc_world = (R_body @ self.engine._wheel_centers.T).transpose(
+                    -1, -2
+                ) + state.x.unsqueeze(1)
+                wp_world = wp_rel + wc_world.unsqueeze(2)
+
         vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts, T_horizon=T_horizon)
 
         # Precompute accelerations (B, SimSteps-1, 3)
@@ -250,7 +286,7 @@ class Simulator(torch.nn.Module):
             state = self.engine.update_state(state, dstate)
 
             R_list.append(quat_to_rotmat(state.q))  # (B, 3, 3)
-            t_list.append(state.x)                   # (B, 3)
+            t_list.append(state.x)  # (B, 3)
             xd_out_list.append(state.xd)
             omega_out_list.append(state.omega)
             timestamps_list.append(ts)
@@ -258,19 +294,17 @@ class Simulator(torch.nn.Module):
             ts = ts + dt
 
         # Build final tensors — SE(3) construction done once outside the loop
-        R_all = torch.stack(R_list, dim=1)           # (B, SimSteps, 3, 3)
-        t_all = torch.stack(t_list, dim=1)           # (B, SimSteps, 3)
+        R_all = torch.stack(R_list, dim=1)  # (B, SimSteps, 3, 3)
+        t_all = torch.stack(t_list, dim=1)  # (B, SimSteps, 3)
         top_part = torch.cat(
             [R_all, t_all.unsqueeze(-1)], dim=-1
-        )                                            # (B, SimSteps, 3, 4)
-        bottom = torch.zeros(
-            actual_bs, num_steps, 1, 4, device=self.device
-        )
+        )  # (B, SimSteps, 3, 4)
+        bottom = torch.zeros(actual_bs, num_steps, 1, 4, device=self.device)
         bottom[:, :, 0, 3] = 1.0
-        poses = torch.cat([top_part, bottom], dim=2) # (B, SimSteps, 4, 4)
+        poses = torch.cat([top_part, bottom], dim=2)  # (B, SimSteps, 4, 4)
 
-        xd_out = torch.stack(xd_out_list, dim=1)     # (B, SimSteps, 3)
-        omega_out = torch.stack(omega_out_list, dim=1)# (B, SimSteps, 3)
-        timestamps = torch.stack(timestamps_list, dim=1) # (B, SimSteps)
+        xd_out = torch.stack(xd_out_list, dim=1)  # (B, SimSteps, 3)
+        omega_out = torch.stack(omega_out_list, dim=1)  # (B, SimSteps, 3)
+        timestamps = torch.stack(timestamps_list, dim=1)  # (B, SimSteps)
 
         return poses, timestamps, xd_out, omega_out

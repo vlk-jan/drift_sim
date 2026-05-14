@@ -147,7 +147,7 @@ class DPhysicsEngine(torch.nn.Module):
         num_contacts = in_contact.sum(dim=(1, 2), keepdim=True).clamp_min(1)
 
         k = stiffness.unsqueeze(-1)  # shape (B, W, 1, 1)
-        b = self.config.damping_alpha * 2 * (self._mass * k / num_contacts) ** 0.5
+        b = self.config.damping_alpha * 2 * (self._mass * k) ** 0.5
 
         # normal component of the velocity
         xd_points_n = (xd_points * normals).sum(dim=-1, keepdim=True)
