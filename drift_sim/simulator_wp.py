@@ -25,7 +25,7 @@ class Simulator(torch.nn.Module):
             robot_model = RobotModelConfig(
                 mass=93.8,
                 cog=torch.tensor([0.145, 0.009, 0.0]),
-                wheel_radii=torch.tensor([0.4685, 0.4685, 0.4685]),
+                wheel_radii=torch.tensor([0.3685, 0.3685, 0.3685]),
                 wheel_centers=torch.tensor(
                     [[0.4, 0.52, 0.0], [0.4, -0.52, 0.0], [-0.5, 0.0, 0.0]]
                 ),

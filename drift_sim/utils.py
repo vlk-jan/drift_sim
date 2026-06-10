@@ -366,7 +366,7 @@ def generate_controls(
     num_robots,
     device,
     seed=42,
-    wheel_radius=0.4685,
+    wheel_radius=0.3685,
     current_vel_linear=1.0,
     clamp=None,
 ):
@@ -419,7 +419,7 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
     timestamps = []
 
     # Parameters for Helhest
-    wheel_radius = 0.4685
+    wheel_radius = 0.3685
     max_speed_lin = 5.0  # m/s
     max_omega = max_speed_lin / wheel_radius
 
