@@ -318,15 +318,12 @@ def find_init_rob_position(
     R = wheel_radii.mean()
 
     # --- 5. Compute correct Z origin height ---
-    # We want to place the origin at (0, 0, z_init) such that the distance to the
-    # contact plane along the normal is exactly the wheel radius R.
-    # Plane eq: dot(n, X - P0) = R => n_z * (z_init - P0_z) - n_x*P0_x - n_y*P0_y = R
-    P0 = P[:, 0, :]
-    nx = n_ground[:, 0:1]
-    ny = n_ground[:, 1:2]
-    nz = n_ground[:, 2:3].clamp_min(1e-6)
-
-    z_init = P0[:, 2:3] + (nx * P0[:, 0:1] + ny * P0[:, 1:2] + R) / nz
+    # Place the body so no wheel penetrates the terrain and the highest-terrain
+    # wheel just touches.  The old plane formula lifted the origin (at XY=0) to
+    # distance R from the contact plane, which overshoots on sloped terrain because
+    # the wheel centres are at (wx, wy), not at (0, 0).
+    # z_wheels shape: (B, 3, 1) → terrain heights at each of the 3 wheel positions.
+    z_init = z_wheels[:, :, 0].max(dim=1, keepdim=True).values + R
 
     # --- 6. Compute orientation aligning robot up-axis with terrain normal ---
     z_body = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
