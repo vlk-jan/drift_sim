@@ -7,6 +7,7 @@ from tensordict import TensorClass
 from simulator.numerical import (
     unit_quaternion,
     interpolate_grid,
+    quat_to_rotmat,
 )
 
 
@@ -272,89 +273,86 @@ def find_init_rob_position(
     device: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Find the initial position (x) and orientation (q) of the robot so that it rests
-    on the terrain at (0,0) by checking the height of the 3 wheel contact points.
+    Find the initial pose so that all 3 wheels rest on the terrain simultaneously.
+
+    The 3 wheel contact points uniquely define a plane.  We iteratively:
+      1. Compute world-frame wheel XY positions given current orientation.
+      2. Sample terrain height at each wheel.
+      3. Fit a plane through the 3 desired wheel-centre positions (terrain_z + R).
+      4. Derive the body orientation that aligns the robot up-axis with that normal.
+      5. Derive the body height so every wheel-centre z equals terrain_z + R.
+      6. Repeat until convergence (typically 3-5 iterations).
 
     Returns:
-        x_init: (B, 3)  world position
+        x_init: (B, 3)  world position of the robot CoM
         q_init: (B, 4)  unit quaternion [w, x, y, z]
     """
-
-    # --- 1. Get wheel XY positions assuming robot is at origin with 0 yaw ---
-    # shape: (3, 3) -> (B, 3, 2)
     grid_center = world_config.grid_center.to(device)
     wheel_centers = torch.as_tensor(
         robot_model.wheel_centers, device=device, dtype=torch.float32
-    )
-    xy_wheels = wheel_centers[:, :2].unsqueeze(0).expand(batch_size, -1, -1)
-
-    # --- 2. Sample terrain height at the 3 wheel positions ---
-    # z_wheels shape: (B, 3, 1)
-    z_wheels = (
-        interpolate_grid(
-            world_config.z_grid, xy_wheels - grid_center, world_config.max_coord
-        )
-        .reshape(batch_size, -1)
-        .unsqueeze(-1)
-    )
-
-    # Construct 3D points on the terrain at the wheels: shape (B, 3, 3)
-    P = torch.cat([xy_wheels, z_wheels], dim=-1)
-
-    # --- 3. Compute normal of the plane passing through the 3 contact points ---
-    v1 = P[:, 1, :] - P[:, 0, :]  # Vector from wheel 0 to wheel 1
-    v2 = P[:, 2, :] - P[:, 0, :]  # Vector from wheel 0 to wheel 2
-    n_ground = torch.linalg.cross(v1, v2, dim=1)
-
-    # Ensure the normal vector points upwards
-    n_ground = torch.where(n_ground[:, 2:3] < 0, -n_ground, n_ground)
-    n_ground_norm = (n_ground.pow(2).sum(dim=1, keepdim=True) + 1e-6).sqrt()
-    n_ground = n_ground / n_ground_norm
-
-    # --- 4. Compute reference offset for wheels / CoM ---
+    )  # (3, 3)
     wheel_radii = torch.as_tensor(
         robot_model.wheel_radii, device=device, dtype=torch.float32
     )
-    R = wheel_radii.mean()
+    R_wheel = wheel_radii.mean()
 
-    # --- 5. Compute correct Z origin height ---
-    # Place the body so no wheel penetrates the terrain and the highest-terrain
-    # wheel just touches.  The old plane formula lifted the origin (at XY=0) to
-    # distance R from the contact plane, which overshoots on sloped terrain because
-    # the wheel centres are at (wx, wy), not at (0, 0).
-    # z_wheels shape: (B, 3, 1) → terrain heights at each of the 3 wheel positions.
-    z_init = z_wheels[:, :, 0].max(dim=1, keepdim=True).values + R
-
-    # --- 6. Compute orientation aligning robot up-axis with terrain normal ---
-    z_body = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
-
-    # Compute axis–angle rotation: rotate z_body → n_ground
-    v = torch.linalg.cross(z_body, n_ground, dim=1)
-
-    # --- Rotation Calculation (Axis-Angle to Quaternion) ---
-    c = (z_body * n_ground).sum(dim=1, keepdim=True)
-    denom = (2 * (1 + c)).clamp_min(1e-6).sqrt()
-    qxyz = v / denom
-    qw = denom * 0.5
-
-    # Stack to (B, 4): [w, x, y, z]
-    q_nominal = torch.cat([qw, qxyz], dim=1)
-    q_nom_norm = (q_nominal.pow(2).sum(dim=1, keepdim=True) + 1e-6).sqrt()
-    q_nominal = q_nominal / q_nom_norm
-
-    # --- Handle Singularities (Perfectly Upright or Upside Down) ---
     q_identity = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(batch_size, 4)
-    q_flip = torch.tensor([0.0, 1.0, 0.0, 0.0], device=device).expand(batch_size, 4)
+    q_flip     = torch.tensor([0.0, 1.0, 0.0, 0.0], device=device).expand(batch_size, 4)
 
-    is_parallel = c.abs() > (1.0 - 1e-4)
-    q_parallel = torch.where(c.expand(batch_size, 4) > 0, q_identity, q_flip)
-    q_final = torch.where(is_parallel.expand(batch_size, 4), q_parallel, q_nominal)
+    # Start upright at origin
+    q = q_identity.clone()
+    x = torch.zeros(batch_size, 3, device=device)
 
-    # --- 7. Compose initial position ---
-    x_init = torch.zeros((batch_size, 3), device=device)
-    x_init[:, 2] = z_init.squeeze(-1)
+    for _ in range(10):
+        # 1. World-frame wheel centre positions (B, 3, 3)
+        R_mat   = quat_to_rotmat(q)                                          # (B, 3, 3)
+        wc_world = torch.einsum("bij,kj->bki", R_mat, wheel_centers) \
+                   + x.unsqueeze(1)                                          # (B, 3, 3)
+        wc_xy   = wc_world[:, :, :2]                                        # (B, 3, 2)
 
-    return x_init, q_final
+        # 2. Terrain height under each wheel centre
+        z_terrain = interpolate_grid(
+            world_config.z_grid,
+            wc_xy - grid_center,
+            world_config.max_coord,
+        ).reshape(batch_size, 3)                                             # (B, 3)
+
+        # 3. Desired wheel-centre heights and plane through them
+        wc_z_target = z_terrain + R_wheel                                   # (B, 3)
+        P = torch.cat([wc_xy, wc_z_target.unsqueeze(-1)], dim=-1)          # (B, 3, 3)
+        v1 = P[:, 1, :] - P[:, 0, :]
+        v2 = P[:, 2, :] - P[:, 0, :]
+        n  = torch.linalg.cross(v1, v2, dim=1)                             # (B, 3)
+        n  = torch.where(n[:, 2:3] < 0, -n, n)
+        n  = n / (n.norm(dim=1, keepdim=True) + 1e-6)
+
+        # 4. Orientation: rotate body up-axis [0,0,1] to align with plane normal
+        z_up   = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
+        v_cross = torch.linalg.cross(z_up, n, dim=1)
+        c       = (z_up * n).sum(dim=1, keepdim=True)
+        denom   = (2 * (1 + c)).clamp_min(1e-6).sqrt()
+        q_new   = torch.cat([denom * 0.5, v_cross / denom], dim=1)
+        q_new   = q_new / (q_new.norm(dim=1, keepdim=True) + 1e-6)
+        is_par  = c.abs() > (1.0 - 1e-4)
+        q_par   = torch.where(c.expand_as(q_new) > 0, q_identity, q_flip)
+        q_new   = torch.where(is_par.expand_as(q_new), q_par, q_new)
+
+        # 5. Body height: for each wheel, z_body = target_z - (R_new @ wc_body)_z
+        #    Take the max so every wheel is at or above its terrain contact height.
+        R_new    = quat_to_rotmat(q_new)                                     # (B, 3, 3)
+        wc_rot_z = torch.einsum("bi,ki->bk", R_new[:, 2, :], wheel_centers) # (B, 3)
+        z_new    = (wc_z_target - wc_rot_z).max(dim=1).values               # (B,)
+
+        x_new       = torch.zeros(batch_size, 3, device=device)
+        x_new[:, 2] = z_new
+
+        # 6. Convergence
+        if (q_new - q).abs().max() < 1e-5 and (x_new - x).abs().max() < 1e-5:
+            q, x = q_new, x_new
+            break
+        q, x = q_new, x_new
+
+    return x, q
 
 
 def generate_controls(
