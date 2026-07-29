@@ -528,3 +528,36 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
     return torch.stack(controls).permute(1, 0, 2), torch.tensor(
         timestamps, device=device
     ).expand(num_robots, -1)
+
+
+def add_helhest_visual_wheels(scene, parent: str = "box") -> None:
+    """
+    Adds rigidly attached visual wheels for the Helhest robot to the SimView scene.
+    """
+    from simview import BodyShapeType, SimViewBody
+    
+    wheels_config = {
+        "left_wheel": {
+            "pos": [0.4, 0.52, 0.0],
+            "rot": [0.7071068, -0.7071068, 0.0, 0.0],
+        },
+        "right_wheel": {
+            "pos": [0.4, -0.52, 0.0],
+            "rot": [0.7071068, 0.7071068, 0.0, 0.0],
+        },
+        "rear_wheel": {
+            "pos": [-0.5, 0.0, 0.0],
+            "rot": [0.7071068, -0.7071068, 0.0, 0.0],
+        },
+    }
+    for name, config in wheels_config.items():
+        scene.add_body_object(
+            SimViewBody.create(
+                name=name,
+                body_type=BodyShapeType.CYLINDER,
+                radius=0.3685,
+                height=0.142,
+                parent=parent,
+                local_transform=config["pos"] + config["rot"],
+            )
+        )
