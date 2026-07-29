@@ -118,9 +118,12 @@ class Simulator(torch.nn.Module):
         # 2. Setup Initial State
         actual_bs = vel_ctrl.shape[0]
         state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
-        state.x, state.q = find_init_rob_position(
-            world_config, self.robot_model, actual_bs, self.device
-        )
+        # Detached: see models/simulator.py's predict_trajectory for why this 3-point
+        # (per-wheel) plane fit must not be differentiable.
+        with torch.no_grad():
+            state.x, state.q = find_init_rob_position(
+                world_config, self.robot_model, actual_bs, self.device
+            )
 
         if initial_state is not None:
             if "xd" in initial_state:

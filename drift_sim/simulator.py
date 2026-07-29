@@ -209,9 +209,17 @@ class Simulator(torch.nn.Module):
             k_stiffness=properties["stiffness"],
         )
         state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
-        state.x, state.q = find_init_rob_position(
-            world_config, self.robot_model, actual_bs, self.device
-        )
+        # Detached: this is a 3-point (per-wheel) plane fit through the height field, so a
+        # single bad cell under one wheel swings the fit a lot. Left differentiable, gradient
+        # descent exploits it as a cheap shortcut to fix rotational trajectory error by locally
+        # saturating height_residual under a wheel instead of learning real terrain/friction
+        # physics — the initial pose should be a non-differentiable function of the terrain
+        # snapshot; gradient into height_residual should only flow through the actual contact
+        # dynamics over the rollout below.
+        with torch.no_grad():
+            state.x, state.q = find_init_rob_position(
+                world_config, self.robot_model, actual_bs, self.device
+            )
 
         if initial_state is not None:
             if "x" in initial_state:
