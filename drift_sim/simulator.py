@@ -158,6 +158,69 @@ class Simulator(torch.nn.Module):
 
         return new_ctrl, target_ts_batch
 
+    @torch.no_grad()
+    def fit_plane_pose(
+        self, world_config: WorldConfig, batch_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Initial pose from the 3-point (per-wheel) plane fit through the height field.
+
+        Detached: a single bad cell under one wheel swings the fit a lot. Left
+        differentiable, gradient descent exploits it as a cheap shortcut to fix
+        rotational trajectory error by locally saturating height_residual under a
+        wheel instead of learning real terrain/friction physics — the initial pose
+        must be a non-differentiable function of the terrain snapshot; gradient
+        into height_residual should only flow through the actual contact dynamics
+        of the rollout.
+        """
+        return find_init_rob_position(
+            world_config, self.robot_model, batch_size, self.device
+        )
+
+    @torch.no_grad()
+    def raise_to_clearance(
+        self, x: torch.Tensor, q: torch.Tensor, world_config: WorldConfig
+    ) -> torch.Tensor:
+        """Raise the robot until all wheel circumference sample points clear the terrain.
+
+        fit_plane_pose only ensures the wheel-triangle plane is tangent; on
+        sloped/curved terrain the 16 circumference sample points per wheel can
+        penetrate, producing enormous initial spring forces that launch the robot
+        upward at t=0. Returns the raised position (input `x` is not mutated —
+        it may be a view into GT batch data).
+
+        Each iteration applies -dh (vertical penetration depth), which removes
+        fraction nz of the true geometric penetration per step — so convergence is
+        geometric. The direct -dh/nz formula would be exact in one step but
+        amplifies tiny dh at near-vertical faces (nz≈0) into a huge over-lift.
+        5 iterations give <3% residual even on 60° slopes while never
+        over-shooting.
+        """
+        x = x.clone()
+        batch_size = x.shape[0]
+        R_body = quat_to_rotmat(q)  # (B, 3, 3)
+        wc_world = (R_body @ self.engine._wheel_centers.T).transpose(
+            -1, -2
+        ) + x.unsqueeze(1)  # (B, W, 3)
+        wp_rel = torch.einsum(
+            "bij,wpj->bwpi", R_body, self.engine._wheel_pos_rel
+        )  # (B, W, P, 3)
+        wp_world = wp_rel + wc_world.unsqueeze(2)  # (B, W, P, 3)
+        for _ in range(5):
+            dh, _, _, _ = self.engine._sample_terrain(
+                wp_world, world_config
+            )  # (B, W, P, 1)
+            max_pen = (
+                (-dh.reshape(batch_size, -1)).clamp(min=0).max(dim=1).values
+            )  # (B,)
+            if (max_pen < 1e-5).all():
+                break
+            x[:, 2] += max_pen
+            wc_world = (R_body @ self.engine._wheel_centers.T).transpose(
+                -1, -2
+            ) + x.unsqueeze(1)
+            wp_world = wp_rel + wc_world.unsqueeze(2)
+        return x
+
     def predict_trajectory(
         self,
         properties: dict,
@@ -209,17 +272,7 @@ class Simulator(torch.nn.Module):
             k_stiffness=properties["stiffness"],
         )
         state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
-        # Detached: this is a 3-point (per-wheel) plane fit through the height field, so a
-        # single bad cell under one wheel swings the fit a lot. Left differentiable, gradient
-        # descent exploits it as a cheap shortcut to fix rotational trajectory error by locally
-        # saturating height_residual under a wheel instead of learning real terrain/friction
-        # physics — the initial pose should be a non-differentiable function of the terrain
-        # snapshot; gradient into height_residual should only flow through the actual contact
-        # dynamics over the rollout below.
-        with torch.no_grad():
-            state.x, state.q = find_init_rob_position(
-                world_config, self.robot_model, actual_bs, self.device
-            )
+        state.x, state.q = self.fit_plane_pose(world_config, actual_bs)
 
         if initial_state is not None:
             if "x" in initial_state:
@@ -233,39 +286,7 @@ class Simulator(torch.nn.Module):
             if "wheel_omega" in initial_state:
                 state.wheel_omega = initial_state["wheel_omega"].to(self.device)
 
-        # Raise the robot until all wheel circumference sample points clear the terrain.
-        # find_init_rob_position only ensures the wheel-triangle plane is tangent; on
-        # sloped/curved terrain the 16 circumference sample points per wheel can penetrate,
-        # producing enormous initial spring forces that launch the robot upward at t=0.
-        with torch.no_grad():
-            R_body = quat_to_rotmat(state.q)  # (B, 3, 3)
-            wc_world = (R_body @ self.engine._wheel_centers.T).transpose(
-                -1, -2
-            ) + state.x.unsqueeze(1)  # (B, W, 3)
-            wp_rel = torch.einsum(
-                "bij,wpj->bwpi", R_body, self.engine._wheel_pos_rel
-            )  # (B, W, P, 3)
-            wp_world = wp_rel + wc_world.unsqueeze(2)  # (B, W, P, 3)
-            # Iteratively raise the robot until all wheel circumference sample points clear
-            # the terrain. Each step applies -dh (vertical penetration depth), which removes
-            # fraction nz of the true geometric penetration per iteration — so convergence is
-            # geometric. The direct -dh/nz formula would be exact in one step but amplifies
-            # tiny dh at near-vertical faces (nz≈0) into a huge over-lift. 5 iterations
-            # give <3% residual even on 60° slopes while never over-shooting.
-            for _ in range(5):
-                dh, _, _, _ = self.engine._sample_terrain(
-                    wp_world, world_config
-                )  # (B, W, P, 1)
-                max_pen = (
-                    (-dh.reshape(actual_bs, -1)).clamp(min=0).max(dim=1).values
-                )  # (B,)
-                if (max_pen < 1e-5).all():
-                    break
-                state.x[:, 2] += max_pen
-                wc_world = (R_body @ self.engine._wheel_centers.T).transpose(
-                    -1, -2
-                ) + state.x.unsqueeze(1)
-                wp_world = wp_rel + wc_world.unsqueeze(2)
+        state.x = self.raise_to_clearance(state.x, state.q, world_config)
 
         vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts, T_horizon=T_horizon)
 
