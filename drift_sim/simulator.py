@@ -238,7 +238,8 @@ class Simulator(torch.nn.Module):
             A dictionary containing terrain properties:
             - "support": torch.Tensor of shape (B, H, W) representing the support surface (height_map - height_residual).
             - "friction": torch.Tensor of shape (B, H, W) or a scalar representing friction coefficients.
-            - "stiffness": torch.Tensor of shape (B, H, W) or a scalar representing stiffness coefficients.
+            - "stiffness": optional (B, H, W) or scalar; if absent, the fixed
+              WorldConfig constant is used (stiffness is not predicted).
         vel_ctrl : torch.Tensor
             Control inputs for wheel velocities. Shape (B, Steps, 3) where 3 is the number of wheels.
         vel_ts : torch.Tensor
@@ -269,7 +270,10 @@ class Simulator(torch.nn.Module):
             side_range=self.side_range,
             fwd_range=self.fwd_range,
             k_friction=properties["friction"],
-            k_stiffness=properties["stiffness"],
+            # Stiffness is not a predicted property (it has no gradient path from
+            # the trajectory in this contact model); fall back to the fixed
+            # WorldConfig constant when the caller does not supply a map.
+            k_stiffness=properties.get("stiffness", 400_000.0),
         )
         state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
         state.x, state.q = self.fit_plane_pose(world_config, actual_bs)

@@ -112,7 +112,9 @@ class Simulator(torch.nn.Module):
             side_range=self.side_range,
             fwd_range=self.fwd_range,
             k_friction=properties["friction"],
-            k_stiffness=properties["stiffness"],
+            # Stiffness is not a predicted property; fall back to the fixed
+            # WorldConfig constant when no map is supplied.
+            k_stiffness=properties.get("stiffness", 400_000.0),
         )
 
         # 2. Setup Initial State
