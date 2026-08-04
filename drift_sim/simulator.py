@@ -19,7 +19,7 @@ class Simulator(torch.nn.Module):
         batch_size=1,
         device=None,
         T_horizon=1.0,
-        dt=0.001,
+        dt=2e-3,  # see PhysicsEngineConfig.dt / scripts/analysis/sweep_dt.py
     ):
         super().__init__()
 
@@ -205,6 +205,9 @@ class Simulator(torch.nn.Module):
             "bij,wpj->bwpi", R_body, self.engine._wheel_pos_rel
         )  # (B, W, P, 3)
         wp_world = wp_rel + wc_world.unsqueeze(2)  # (B, W, P, 3)
+        # Fixed iteration count, no early exit: the `.all()` convergence test cost
+        # a device->host sync per iteration, and the loop converges in one or two
+        # passes anyway, so the extra iterations are cheaper than the stalls.
         for _ in range(5):
             dh, _, _, _ = self.engine._sample_terrain(
                 wp_world, world_config
@@ -212,8 +215,6 @@ class Simulator(torch.nn.Module):
             max_pen = (
                 (-dh.reshape(batch_size, -1)).clamp(min=0).max(dim=1).values
             )  # (B,)
-            if (max_pen < 1e-5).all():
-                break
             x[:, 2] += max_pen
             wc_world = (R_body @ self.engine._wheel_centers.T).transpose(
                 -1, -2

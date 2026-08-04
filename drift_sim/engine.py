@@ -36,6 +36,13 @@ class DPhysicsEngine(torch.nn.Module):
             "_wheel_pos_rel", self._precompute_wheel_points(n_points=16)
         )
         self.register_buffer("_I_body", robot_model.inertia_tensor.float())
+        # Inverting the (constant) body inertia once lets the angular update use
+        # I_world^-1 = R I_body^-1 R^T instead of solving a 3x3 system every
+        # timestep — torch.linalg.solve also reads its `info` tensor on the host,
+        # which stalls the CUDA queue once per step.
+        self.register_buffer(
+            "_I_body_inv", torch.linalg.inv(robot_model.inertia_tensor.float())
+        )
         self.register_buffer("_wheel_centers", robot_model.wheel_centers.float())
         self.register_buffer("_cog", robot_model.cog.float())
         self._mass = robot_model.mass
@@ -182,7 +189,8 @@ class DPhysicsEngine(torch.nn.Module):
         R = quat_to_rotmat(state.q)
 
         # Transform Inertia to World Frame: I_world = R @ I_body @ R.T
-        I_world = R @ self._I_body.unsqueeze(0) @ R.transpose(-1, -2)  # (B, 3, 3)
+        R_T = R.transpose(-1, -2)
+        I_world = R @ self._I_body @ R_T  # (B, 3, 3)
 
         wheel_centers = self._wheel_centers
         wheel_centers_world = (R @ wheel_centers.T).transpose(
@@ -203,6 +211,10 @@ class DPhysicsEngine(torch.nn.Module):
         # Interpret wheel_omega as scalars around Y-axis (Robot Frame)
         # (B, 3) -> (B, 3, 3) vectors [0, w, 0]
         zeros = torch.zeros_like(state.wheel_omega)
+        # .float() is load-bearing, not defensive: the dataset hands wheel speeds
+        # over as float64 (datasets/pc_dataset.py), and without the cast the
+        # matmul against the float32 rotation below raises. It is a no-op when the
+        # tensor is already float32, so it costs nothing on the synthetic paths.
         omega_local = torch.stack([zeros, state.wheel_omega, zeros], dim=-1).float()
         # Rotate to World Frame
         omega_world = (R.unsqueeze(1) @ omega_local.unsqueeze(-1)).squeeze(-1)
@@ -296,13 +308,13 @@ class DPhysicsEngine(torch.nn.Module):
         M_net = M_net * scale
 
         # Solve for angular acceleration
-        # dot(omega) = inv(I) @ (M - omega x (I @ omega))
+        # dot(omega) = inv(I) @ (M - omega x (I @ omega)), with
+        # inv(I_world) = R @ inv(I_body) @ R.T (R orthonormal)
         Iw = (I_world @ state.omega.unsqueeze(-1)).squeeze(-1)
         w_x_Iw = torch.linalg.cross(state.omega, Iw)
 
-        omega_d = torch.linalg.solve(I_world, (M_net - w_x_Iw).unsqueeze(-1)).squeeze(
-            -1
-        )
+        I_world_inv = R @ self._I_body_inv @ R_T
+        omega_d = (I_world_inv @ (M_net - w_x_Iw).unsqueeze(-1)).squeeze(-1)
 
         # next state derivative
         next_state_der = PhysicsStateDer(

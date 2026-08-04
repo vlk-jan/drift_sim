@@ -194,7 +194,11 @@ class PhysicsEngineConfig(BaseConfig):
     """
 
     num_robots: int = 1
-    dt: float = 1e-3
+    # 2e-3 chosen by scripts/analysis/sweep_dt.py on real helhest terrain (see the
+    # dt section in CLAUDE.md): it halves the step count versus the old 1e-3 while
+    # GT trajectory error, final error and gradient norm are all indistinguishable.
+    # 3e-3 is where gradient fidelity starts to degrade on both engines.
+    dt: float = 2e-3
     g: float = 9.81
     torque_limit: float = 5000.0
     damping_alpha: float = 1.0
@@ -346,10 +350,10 @@ def find_init_rob_position(
         x_new       = torch.zeros(batch_size, 3, device=device)
         x_new[:, 2] = z_new
 
-        # 6. Convergence
-        if (q_new - q).abs().max() < 1e-5 and (x_new - x).abs().max() < 1e-5:
-            q, x = q_new, x_new
-            break
+        # The iteration is idempotent once converged (a converged (q, x) maps to
+        # itself), so the fixed 10 passes give the same answer as an early exit
+        # without the two device->host syncs per iteration that testing for it
+        # would cost.
         q, x = q_new, x_new
 
     return x, q

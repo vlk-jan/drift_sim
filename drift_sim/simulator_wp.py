@@ -17,7 +17,12 @@ class Simulator(torch.nn.Module):
         batch_size=1,
         device=None,
         T_horizon=5.0,
-        dt=0.01,
+        # Matches simulator/engine.py. The old 0.01 default put omega*dt near the
+        # semi-implicit-Euler stability edge at the stiffnesses actually used
+        # (k=4e5, m=93.8 -> omega ~ 65 rad/s), and made warp/torch rollouts
+        # incomparable. 2e-3 is the swept optimum — see PhysicsEngineConfig.dt.
+        dt=2e-3,
+        clip_grad_norm=None,
     ):
         super().__init__()
 
@@ -56,7 +61,9 @@ class Simulator(torch.nn.Module):
         self.device = device
 
         MAX_STEPS = 100_000
-        self.engine = WarpStaticEngine(robot_model, batch_size, MAX_STEPS, device)
+        self.engine = WarpStaticEngine(
+            robot_model, batch_size, MAX_STEPS, device, clip_grad_norm=clip_grad_norm
+        )
         self.engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
         self.res = None
         self.max_coord = None
@@ -143,10 +150,21 @@ class Simulator(torch.nn.Module):
         vel_ctrl_permuted = vel_ctrl.permute(1, 0, 2)
 
         sim_dt = self.engine_config.dt
-        num_steps = int(self.T_horizon / sim_dt)
+        # round, not truncate: 1.0/1e-3 lands on 999.9999... in binary floating
+        # point, which silently made warp rollouts one step shorter than torch's
+        num_steps = int(round(float(self.T_horizon) / sim_dt))
 
+        # float64 is mandatory, not tidiness: these are absolute Unix timestamps
+        # (~1.76e9), where float32 spacing is ~128 s. Building the query grid at the
+        # default dtype collapsed all `num_steps` samples onto a single value tens
+        # of seconds off, so every GT pose timestamp-matched to predicted index 0
+        # and every GT-referenced metric silently measured nothing.
         query_times = torch.linspace(
-            ref_ts[0], ref_ts[0] + self.T_horizon, num_steps, device=self.device
+            ref_ts[0],
+            ref_ts[0] + self.T_horizon,
+            num_steps,
+            device=self.device,
+            dtype=torch.float64,
         )
 
         idx = torch.searchsorted(ref_ts, query_times, right=True) - 1
