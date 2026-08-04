@@ -158,9 +158,9 @@ class Simulator(torch.nn.Module):
 
         if initial_state is not None:
             # "x"/"q" override the terrain-fitted pose. The segmented trajectory
-            # loss (utils/trainer.py) relies on this to continue each segment from
-            # the previous one's end pose; ignoring them here silently restarted
-            # every segment at the fitted origin pose.
+            # loss (utils/trainer.py) relies on this to seed each segment at the
+            # GT pose closest to its own start timestamp; ignoring them here
+            # would silently restart every segment at the fitted origin pose.
             if "x" in initial_state:
                 state.x = initial_state["x"].to(self.device)
             if "q" in initial_state:

@@ -260,10 +260,10 @@ def test_gradients_match_torch_batched(n_steps):
 def test_initial_pose_override_is_honoured(engine):
     """initial_state x/q must override the terrain-fitted start pose.
 
-    The segmented trajectory loss (utils/trainer.py) continues each segment from
-    the previous one's end pose through exactly this path. The warp wrapper used
-    to ignore x/q and silently re-seed from the plane fit, which produces no error
-    — just wrong segments.
+    The segmented trajectory loss (utils/trainer.py) seeds each segment at the
+    GT pose closest to its own start timestamp through exactly this path. The
+    warp wrapper used to ignore x/q and silently re-seed from the plane fit,
+    which produces no error — just wrong segments.
     """
     n_steps = 50
     t_horizon = n_steps * DT
