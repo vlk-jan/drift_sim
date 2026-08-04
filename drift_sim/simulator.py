@@ -6,6 +6,7 @@ from simulator.engine import DPhysicsEngine
 from simulator.utils import (
     find_init_rob_position,
     PhysicsEngineConfig,
+    raise_to_clearance,
     RobotModelConfig,
     PhysicsState,
     WorldConfig,
@@ -194,33 +195,12 @@ class Simulator(torch.nn.Module):
         amplifies tiny dh at near-vertical faces (nz≈0) into a huge over-lift.
         5 iterations give <3% residual even on 60° slopes while never
         over-shooting.
+
+        Implementation lives in simulator/utils.py so the warp wrapper seats the
+        robot identically; this stays as the public entry point that analysis
+        scripts already call.
         """
-        x = x.clone()
-        batch_size = x.shape[0]
-        R_body = quat_to_rotmat(q)  # (B, 3, 3)
-        wc_world = (R_body @ self.engine._wheel_centers.T).transpose(
-            -1, -2
-        ) + x.unsqueeze(1)  # (B, W, 3)
-        wp_rel = torch.einsum(
-            "bij,wpj->bwpi", R_body, self.engine._wheel_pos_rel
-        )  # (B, W, P, 3)
-        wp_world = wp_rel + wc_world.unsqueeze(2)  # (B, W, P, 3)
-        # Fixed iteration count, no early exit: the `.all()` convergence test cost
-        # a device->host sync per iteration, and the loop converges in one or two
-        # passes anyway, so the extra iterations are cheaper than the stalls.
-        for _ in range(5):
-            dh, _, _, _ = self.engine._sample_terrain(
-                wp_world, world_config
-            )  # (B, W, P, 1)
-            max_pen = (
-                (-dh.reshape(batch_size, -1)).clamp(min=0).max(dim=1).values
-            )  # (B,)
-            x[:, 2] += max_pen
-            wc_world = (R_body @ self.engine._wheel_centers.T).transpose(
-                -1, -2
-            ) + x.unsqueeze(1)
-            wp_world = wp_rel + wc_world.unsqueeze(2)
-        return x
+        return raise_to_clearance(self.engine, x, q, world_config)
 
     def predict_trajectory(
         self,

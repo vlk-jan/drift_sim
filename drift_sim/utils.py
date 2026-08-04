@@ -359,6 +359,45 @@ def find_init_rob_position(
     return x, q
 
 
+@torch.no_grad()
+def raise_to_clearance(engine, x, q, world_config):
+    """Raise the robot until all wheel circumference sample points clear the terrain.
+
+    find_init_rob_position only makes the wheel-triangle plane tangent; on
+    sloped/curved terrain the 16 circumference sample points per wheel can still
+    penetrate, producing enormous initial spring forces that launch the robot
+    upward at t=0. Returns the raised position (input `x` is not mutated — it may
+    be a view into GT batch data).
+
+    Each iteration applies -dh (vertical penetration depth), which removes fraction
+    nz of the true geometric penetration per step, so convergence is geometric. The
+    direct -dh/nz formula would be exact in one step but amplifies tiny dh at
+    near-vertical faces (nz~0) into a huge over-lift. 5 iterations give <3% residual
+    even on 60 degree slopes while never over-shooting.
+
+    Free function rather than a method so both simulator wrappers seat the robot
+    identically — the warp wrapper used to skip this step, which left it starting
+    inside the terrain on any non-flat window. `engine` only supplies geometry
+    (_wheel_centers, _wheel_pos_rel, _sample_terrain), so either engine's torch
+    DPhysicsEngine works.
+    """
+    x = x.clone()
+    batch_size = x.shape[0]
+    R_body = quat_to_rotmat(q)  # (B, 3, 3)
+    wp_rel = torch.einsum("bij,wpj->bwpi", R_body, engine._wheel_pos_rel)  # (B,W,P,3)
+
+    # Fixed iteration count, no early exit: the `.all()` convergence test cost a
+    # device->host sync per iteration, and max_pen is clamped at 0, so the extra
+    # iterations add exactly nothing once converged.
+    for _ in range(5):
+        wc_world = (R_body @ engine._wheel_centers.T).transpose(-1, -2) + x.unsqueeze(1)
+        wp_world = wp_rel + wc_world.unsqueeze(2)  # (B, W, P, 3)
+        dh, _, _, _ = engine._sample_terrain(wp_world, world_config)  # (B, W, P, 1)
+        max_pen = (-dh.reshape(batch_size, -1)).clamp(min=0).max(dim=1).values  # (B,)
+        x[:, 2] += max_pen
+    return x
+
+
 def generate_controls(
     duration,
     dt,

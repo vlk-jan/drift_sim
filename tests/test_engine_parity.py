@@ -75,11 +75,16 @@ def _make_sim(engine, t_horizon, batch_size=1):
     return sim
 
 
-def _make_inputs(t_horizon, batch_size=1, n_ctrl=50):
+def _make_inputs(t_horizon, batch_size=1, n_ctrl=50, distinct_batch=False):
     """Flat terrain, forward drive with a slight turn.
 
     The turn matters: on a perfectly straight drive the friction gradient is
     legitimately near zero, so a friction check would pass vacuously.
+
+    `distinct_batch` gives every batch element its own sloped terrain, its own
+    friction and its own wheel speeds. Without that, a batch is B copies of one
+    problem and a wrapper that samples terrain[0] for every robot looks perfectly
+    correct — which is exactly the bug the warp engine shipped with.
     """
     support = torch.zeros(
         batch_size, GRID_N, GRID_N, device=DEVICE, requires_grad=True
@@ -89,26 +94,42 @@ def _make_inputs(t_horizon, batch_size=1, n_ctrl=50):
     )
     ctrl = torch.ones(batch_size, n_ctrl, 3, device=DEVICE)
     ctrl[..., 1] *= 0.7
+
+    if distinct_batch:
+        ramp = torch.linspace(-1.0, 1.0, GRID_N, device=DEVICE)
+        slopes = torch.linspace(0.02, 0.10, batch_size, device=DEVICE)
+        # b-th element gets a distinct tilt, so mixing up batch indices moves the
+        # trajectory rather than cancelling out
+        terrain = slopes.view(-1, 1, 1) * ramp.view(1, 1, -1).expand(
+            batch_size, GRID_N, GRID_N
+        )
+        support = terrain.detach().clone().requires_grad_(True)
+        fr = torch.linspace(0.4, 0.9, batch_size, device=DEVICE).view(-1, 1, 1)
+        friction = fr.expand(batch_size, GRID_N, GRID_N).clone().requires_grad_(True)
+        ctrl = ctrl * torch.linspace(0.8, 1.2, batch_size, device=DEVICE).view(-1, 1, 1)
+
     ctrl_ts = torch.linspace(0.0, max(t_horizon, DT), n_ctrl, device=DEVICE)
     ctrl_ts = ctrl_ts.unsqueeze(0).expand(batch_size, -1)
     return support, friction, ctrl, ctrl_ts
 
 
-def _rollout(engine, n_steps, batch_size=1):
+def _rollout(engine, n_steps, batch_size=1, distinct_batch=False):
     """Run one rollout and backprop a trajectory loss.
 
-    Returns (final_pos, grad_support, grad_friction).
+    Returns (final_pos_per_batch, grad_support, grad_friction).
     """
     t_horizon = n_steps * DT
     sim = _make_sim(engine, t_horizon, batch_size)
-    support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon, batch_size)
+    support, friction, ctrl, ctrl_ts = _make_inputs(
+        t_horizon, batch_size, distinct_batch=distinct_batch
+    )
 
     traj, _, _, _ = sim.predict_trajectory(
         {"support": support, "friction": friction}, ctrl, ctrl_ts
     )
     traj[:, :, :3, 3].pow(2).sum().backward()
 
-    return traj[0, -1, :3, 3].detach().clone(), support.grad.clone(), friction.grad.clone()
+    return traj[:, -1, :3, 3].detach().clone(), support.grad.clone(), friction.grad.clone()
 
 
 def _cos(a, b):
@@ -167,6 +188,99 @@ def test_gradients_match_torch(n_steps):
             f"{name} gradient magnitude diverged at {n_steps} steps: "
             f"‖warp‖/‖torch‖={ratio:.3e} (need {lo}..{hi})"
         )
+
+
+@requires_cuda
+@pytest.mark.parametrize("engine", ["torch", "warp"])
+def test_batch_elements_are_independent(engine):
+    """Element b of a batched rollout must equal that window run on its own.
+
+    This is the check that the warp engine's original `world_config.z_grid[0]`
+    bug needed and never got: it sampled batch element 0's terrain for every
+    robot, which is invisible whenever a test batch is B copies of one problem,
+    and invisible at B=1. Training runs at B=48 with 48 different terrains.
+    """
+    n_steps, B = 100, 4
+    t_horizon = n_steps * DT
+    support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon, B, distinct_batch=True)
+
+    sim = _make_sim(engine, t_horizon, B)
+    traj, _, _, _ = sim.predict_trajectory(
+        {"support": support, "friction": friction}, ctrl, ctrl_ts
+    )
+    batched = traj[:, -1, :3, 3].detach().clone()
+
+    sim1 = _make_sim(engine, t_horizon, 1)
+    for b in range(B):
+        traj_b, _, _, _ = sim1.predict_trajectory(
+            {"support": support[b : b + 1].detach(),
+             "friction": friction[b : b + 1].detach()},
+            ctrl[b : b + 1],
+            ctrl_ts[b : b + 1],
+        )
+        alone = traj_b[0, -1, :3, 3].detach()
+        err = (batched[b] - alone).norm().item()
+        assert err < 1e-4, (
+            f"{engine}: batch element {b} moved {err:.3e} m when run alongside "
+            f"others — batch elements are not independent (terrain indexing?)"
+        )
+
+    # and the elements must actually differ, or the check above is vacuous
+    spread = (batched - batched.mean(dim=0)).norm(dim=-1).max().item()
+    assert spread > 1e-3, "batch elements are identical; the test proves nothing"
+
+
+@requires_cuda
+@pytest.mark.parametrize("n_steps", [100, 500])
+def test_gradients_match_torch_batched(n_steps):
+    """Gradient parity at B>1 with a different terrain per element.
+
+    B=1 parity cannot see a wrapper that mixes up batch indices, and training runs
+    batched. Each element's terrain gradient must land on that element's slice.
+    """
+    B = 4
+    _, gs_t, gf_t = _rollout("torch", n_steps, B, distinct_batch=True)
+    _, gs_w, gf_w = _rollout("warp", n_steps, B, distinct_batch=True)
+
+    assert torch.isfinite(gs_w).all() and torch.isfinite(gf_w).all()
+    for name, gw, gt in (("support", gs_w, gs_t), ("friction", gf_w, gf_t)):
+        for b in range(B):
+            cos = _cos(gw[b], gt[b])
+            assert cos > GRAD_COS_MIN, (
+                f"{name} gradient of batch element {b} diverged at {n_steps} "
+                f"steps: cosine={cos:.4f}"
+            )
+        ratio = _ratio(gw, gt)
+        lo, hi = GRAD_RATIO_RANGE
+        assert lo < ratio < hi, f"{name} gradient magnitude ratio {ratio:.3e}"
+
+
+@requires_cuda
+@pytest.mark.parametrize("engine", ["torch", "warp"])
+def test_initial_pose_override_is_honoured(engine):
+    """initial_state x/q must override the terrain-fitted start pose.
+
+    The segmented trajectory loss (utils/trainer.py) continues each segment from
+    the previous one's end pose through exactly this path. The warp wrapper used
+    to ignore x/q and silently re-seed from the plane fit, which produces no error
+    — just wrong segments.
+    """
+    n_steps = 50
+    t_horizon = n_steps * DT
+    sim = _make_sim(engine, t_horizon)
+    support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon)
+    props = {"support": support.detach(), "friction": friction.detach()}
+
+    base, _, _, _ = sim.predict_trajectory(props, ctrl, ctrl_ts)
+    shifted, _, _, _ = sim.predict_trajectory(
+        props, ctrl, ctrl_ts,
+        initial_state={"x": torch.tensor([[3.0, -2.0, 0.0]], device=DEVICE)},
+    )
+    dxy = (shifted[0, 0, :2, 3] - base[0, 0, :2, 3]).detach()
+    assert torch.allclose(dxy, torch.tensor([3.0, -2.0], device=DEVICE), atol=1e-3), (
+        f"{engine}: initial_state['x'] was ignored — start offset {dxy.tolist()} "
+        "instead of [3.0, -2.0]"
+    )
 
 
 @requires_cuda
