@@ -398,6 +398,50 @@ def raise_to_clearance(engine, x, q, world_config):
     return x
 
 
+@torch.no_grad()
+def compute_wheel_contacts(engine, traj_se3, world_config, chunk_size=64):
+    """Per-step in-contact mask for a single rollout's wheel-circumference points.
+
+    `traj_se3` is a (T, 4, 4) world-frame SE3 pose stack (one batch element, e.g.
+    one row of a `predict_trajectory` output). Returns a (T, W*P) bool array:
+    which of `engine`'s fixed wheel-circumference points (`_wheel_centers`,
+    `_wheel_pos_rel`, the same geometry used by `raise_to_clearance` above) are
+    penetrating the terrain (`dh < 0`, see `engine.forward`'s docstring) at each
+    step -- a debugging signal for spring-contact pathologies (e.g. the
+    seating/launch bug this module already guards against), not something the
+    engine keeps around after computing the resulting force.
+
+    Chunked over T (rather than one `(T, H, W)` broadcast of `world_config`)
+    since this only runs post-hoc over a handful of selected SimView-export
+    trajectories, not inside the training loop.
+    """
+    T = traj_se3.shape[0]
+    R = traj_se3[:, :3, :3]
+    x = traj_se3[:, :3, 3]
+    out = []
+    for start in range(0, T, chunk_size):
+        end = min(start + chunk_size, T)
+        n = end - start
+        Rc, xc = R[start:end], x[start:end]
+        wp_rel = torch.einsum("tij,wpj->twpi", Rc, engine._wheel_pos_rel)
+        wc_world = (
+            torch.einsum("tij,wj->twi", Rc, engine._wheel_centers) + xc.unsqueeze(1)
+        )
+        wp_world = wp_rel + wc_world.unsqueeze(2)  # (n, W, P, 3)
+        wc = WorldConfig(
+            z_grid=world_config.z_grid.expand(n, -1, -1),
+            grid_res=world_config.grid_res,
+            max_coord=world_config.max_coord,
+            side_range=world_config.side_range,
+            fwd_range=world_config.fwd_range,
+            k_friction=world_config.k_friction.expand(n, -1, -1),
+            k_stiffness=world_config.k_stiffness.expand(n, -1, -1),
+        )
+        dh, _, _, _ = engine._sample_terrain(wp_world, wc)  # (n, W, P, 1)
+        out.append((dh.squeeze(-1) < 0).reshape(n, -1))
+    return torch.cat(out, dim=0)  # (T, W*P) bool
+
+
 def generate_controls(
     duration,
     dt,
