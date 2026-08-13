@@ -408,10 +408,18 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
         # State trajectories: one slot per step, so the tape's reverse pass finds
         # every launch's primal inputs still intact.
-        state_x = wp.zeros((num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True)
-        state_q = wp.zeros((num_steps + 1, B), dtype=wp.quat, device=device, requires_grad=True)
-        state_xd = wp.zeros((num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True)
-        state_omega = wp.zeros((num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True)
+        state_x = wp.zeros(
+            (num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True
+        )
+        state_q = wp.zeros(
+            (num_steps + 1, B), dtype=wp.quat, device=device, requires_grad=True
+        )
+        state_xd = wp.zeros(
+            (num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True
+        )
+        state_omega = wp.zeros(
+            (num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True
+        )
 
         wp.copy(state_x[0], to_wp(init_x, wp.vec3, grad=False))
         wp.copy(state_q[0], to_wp(init_q[:, [1, 2, 3, 0]], wp.quat, grad=False))
@@ -420,9 +428,15 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
         # Per-step accumulators, likewise one slot per step: reusing a single
         # buffer would need a zeroing pass that the tape cannot differentiate.
-        counts = wp.zeros((num_steps, B), dtype=float, device=device, requires_grad=True)
-        force_acc = wp.zeros((num_steps, B), dtype=wp.vec3, device=device, requires_grad=True)
-        torque_acc = wp.zeros((num_steps, B), dtype=wp.vec3, device=device, requires_grad=True)
+        counts = wp.zeros(
+            (num_steps, B), dtype=float, device=device, requires_grad=True
+        )
+        force_acc = wp.zeros(
+            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
+        )
+        torque_acc = wp.zeros(
+            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
+        )
 
         gc_wp = wp.vec2(float(grid_center_t[0]), float(grid_center_t[1]))
         mc_wp = wp.vec2(float(max_coord_t[0]), float(max_coord_t[1]))
@@ -434,27 +448,67 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                 wp.launch(
                     count_contacts_kernel,
                     dim=point_dim,
-                    inputs=[step, state_x, state_q, wheel_centers_wp, wheel_radii_wp,
-                            wp_z, wp_n, gc_wp, mc_wp],
+                    inputs=[
+                        step,
+                        state_x,
+                        state_q,
+                        wheel_centers_wp,
+                        wheel_radii_wp,
+                        wp_z,
+                        wp_n,
+                        gc_wp,
+                        mc_wp,
+                    ],
                     outputs=[counts],
                     device=device,
                 )
                 wp.launch(
                     accumulate_forces_kernel,
                     dim=point_dim,
-                    inputs=[step, state_x, state_q, state_xd, state_omega, wp_ctrl,
-                            wheel_centers_wp, wheel_radii_wp, cog_wp, mass,
-                            wp_z, wp_n, wp_kf, wp_ks, gc_wp, mc_wp, dt,
-                            damping_alpha, soft_contact_sigma, counts],
+                    inputs=[
+                        step,
+                        state_x,
+                        state_q,
+                        state_xd,
+                        state_omega,
+                        wp_ctrl,
+                        wheel_centers_wp,
+                        wheel_radii_wp,
+                        cog_wp,
+                        mass,
+                        wp_z,
+                        wp_n,
+                        wp_kf,
+                        wp_ks,
+                        gc_wp,
+                        mc_wp,
+                        dt,
+                        damping_alpha,
+                        soft_contact_sigma,
+                        counts,
+                    ],
                     outputs=[force_acc, torque_acc],
                     device=device,
                 )
                 wp.launch(
                     integrate_kernel,
                     dim=B,
-                    inputs=[step, state_x, state_q, state_xd, state_omega,
-                            inertia_wp, inertia_inv_wp, mass, g, dt, ang_damping,
-                            torque_limit, force_acc, torque_acc],
+                    inputs=[
+                        step,
+                        state_x,
+                        state_q,
+                        state_xd,
+                        state_omega,
+                        inertia_wp,
+                        inertia_inv_wp,
+                        mass,
+                        g,
+                        dt,
+                        ang_damping,
+                        torque_limit,
+                        force_acc,
+                        torque_acc,
+                    ],
                     device=device,
                 )
 
@@ -538,7 +592,12 @@ class WarpStaticEngine:
     """Holds the robot constants; state and scratch are allocated per rollout."""
 
     def __init__(
-        self, robot_model_config, batch_size, max_steps, device="cuda", clip_grad_norm=None
+        self,
+        robot_model_config,
+        batch_size,
+        max_steps,
+        device="cuda",
+        clip_grad_norm=None,
     ):
         self.device = wp.get_device(device)
         self.batch_size = batch_size
@@ -559,7 +618,9 @@ class WarpStaticEngine:
         self.wp_inertia_inv = wp.mat33(*torch.linalg.inv(inertia).flatten().tolist())
         self.wp_cog = wp.vec3(*r.cog.to(device).float().tolist())
 
-    def run_trajectory(self, init_state, control_velocities, world_config, engine_config):
+    def run_trajectory(
+        self, init_state, control_velocities, world_config, engine_config
+    ):
         """control_velocities: (num_steps, B, 3) wheel speeds. Returns (T,B,...)."""
         num_steps = control_velocities.shape[0]
         if num_steps > self.max_steps:

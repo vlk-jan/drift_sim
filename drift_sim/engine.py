@@ -13,7 +13,6 @@ from simulator.utils import (
     WorldConfig,
 )
 
-
 ###############################################################################
 # Less Simple Model
 # - rigid body only
@@ -36,10 +35,6 @@ class DPhysicsEngine(torch.nn.Module):
             "_wheel_pos_rel", self._precompute_wheel_points(n_points=16)
         )
         self.register_buffer("_I_body", robot_model.inertia_tensor.float())
-        # Inverting the (constant) body inertia once lets the angular update use
-        # I_world^-1 = R I_body^-1 R^T instead of solving a 3x3 system every
-        # timestep — torch.linalg.solve also reads its `info` tensor on the host,
-        # which stalls the CUDA queue once per step.
         self.register_buffer(
             "_I_body_inv", torch.linalg.inv(robot_model.inertia_tensor.float())
         )
@@ -211,10 +206,7 @@ class DPhysicsEngine(torch.nn.Module):
         # Interpret wheel_omega as scalars around Y-axis (Robot Frame)
         # (B, 3) -> (B, 3, 3) vectors [0, w, 0]
         zeros = torch.zeros_like(state.wheel_omega)
-        # .float() is load-bearing, not defensive: the dataset hands wheel speeds
-        # over as float64 (datasets/pc_dataset.py), and without the cast the
-        # matmul against the float32 rotation below raises. It is a no-op when the
-        # tensor is already float32, so it costs nothing on the synthetic paths.
+        # .float() is critical, wheel points are passed as float64
         omega_local = torch.stack([zeros, state.wheel_omega, zeros], dim=-1).float()
         # Rotate to World Frame
         omega_world = (R.unsqueeze(1) @ omega_local.unsqueeze(-1)).squeeze(-1)
