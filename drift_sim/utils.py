@@ -46,7 +46,16 @@ class WorldConfig(BaseConfig):
     z_grid (torch.Tensor): z-coordinates of the grid.
     normals (torch.Tensor): normals of the terrain. Shape (B, 3, grid_dim, grid_dim).
     grid_res (float): resolution of the grid in meters. Represents the metric distance between 2 centers of adjacent grid cells.
-    max_coord (float): maximum coordinate of the grid.
+    max_coord (float): distance from the grid center to the outermost cell center
+        (grid_sample align_corners=True convention). Every sampler normalises a
+        metric query as ``u = (xy - grid_center) / max_coord`` and calls
+        ``F.grid_sample(..., align_corners=True)``, where u = ±1 maps onto cell
+        index 0 / n-1 -- the outermost cell *centers*, not the grid's outer
+        edges. For an n-cell grid whose edges span ±E, that means
+        ``max_coord = E - grid_res / 2``, half a cell inside the edge; passing E
+        instead compresses all terrain queries by (n-1)/n. See
+        ``utils/misc.py::world_cfg_from_config``, which derives it from the
+        perception config. May be a scalar or a per-axis (x, y) pair.
     k_stiffness (float or torch.Tensor): stiffness of the terrain. Default is 40_000.
     k_friction (float or torch.Tensor): friction of the terrain. Default is 0.5.
     """
