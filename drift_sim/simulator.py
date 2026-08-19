@@ -117,6 +117,11 @@ class Simulator(torch.nn.Module):
 
         # 1. Define target timeline
         # Create target timestamps: [t_start, t_start + dt, ..., t_end]
+        # vel_ts is float64 by REQUIREMENT, not accident: these are absolute
+        # Unix timestamps (~1.76e9 s), where float32 spacing is ~128 s — far
+        # coarser than the 2 ms sim step. Everything derived from it below
+        # (target_ts, alpha, and therefore new_ctrl) inherits float64; do not
+        # downcast the timeline.
         t_start = vel_ts[:, 0].unsqueeze(1)
         num_steps = int(torch.ceil(T_horizon / dt).item()) + 1
         target_ts = t_start + (torch.arange(num_steps, device=device) * dt).unsqueeze(
@@ -242,6 +247,9 @@ class Simulator(torch.nn.Module):
             Shape (B, SimSteps, 4, 4).
         timestamps : torch.Tensor
             The timestamps for each simulation step. Shape (B, SimSteps).
+            Pose i is the post-step state, stamped at the step's end, so element
+            b's first stamp is vel_ts[b, 0] + dt (same convention as
+            models/simulator_wp.py).
         """
         actual_bs = vel_ctrl.shape[0]
 
@@ -298,13 +306,14 @@ class Simulator(torch.nn.Module):
             dstate = self.engine.forward(state, curr_acceleration, world_config)
             state = self.engine.update_state(state, dstate)
 
+            # poses are the post-step states, stamped at the step's END
+            ts = ts + dt
+
             R_list.append(quat_to_rotmat(state.q))  # (B, 3, 3)
             t_list.append(state.x)  # (B, 3)
             xd_out_list.append(state.xd)
             omega_out_list.append(state.omega)
             timestamps_list.append(ts)
-
-            ts = ts + dt
 
         # Build final tensors — SE(3) construction done once outside the loop
         R_all = torch.stack(R_list, dim=1)  # (B, SimSteps, 3, 3)
