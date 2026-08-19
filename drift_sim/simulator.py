@@ -1,15 +1,16 @@
 from typing import Optional
+
 import torch
 
-from simulator.numerical import quat_to_rotmat
 from simulator.engine import DPhysicsEngine
+from simulator.numerical import quat_to_rotmat
 from simulator.utils import (
-    find_init_rob_position,
     PhysicsEngineConfig,
-    raise_to_clearance,
-    RobotModelConfig,
     PhysicsState,
+    RobotModelConfig,
     WorldConfig,
+    find_init_rob_position,
+    raise_to_clearance,
 )
 
 
@@ -251,9 +252,7 @@ class Simulator(torch.nn.Module):
             side_range=self.side_range,
             fwd_range=self.fwd_range,
             k_friction=properties["friction"],
-            # Stiffness is not a predicted property (it has no gradient path from
-            # the trajectory in this contact model); fall back to the fixed
-            # WorldConfig constant when the caller does not supply a map.
+            # Stiffness is not a predicted property
             k_stiffness=properties.get("stiffness", 400_000.0),
         )
         state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)

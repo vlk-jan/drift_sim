@@ -1,13 +1,13 @@
 from dataclasses import dataclass
-from typing import Optional, Union, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 from tensordict import TensorClass
 
 from simulator.numerical import (
-    unit_quaternion,
     interpolate_grid,
     quat_to_rotmat,
+    unit_quaternion,
 )
 
 
@@ -301,7 +301,7 @@ def find_init_rob_position(
     R_wheel = wheel_radii.mean()
 
     q_identity = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(batch_size, 4)
-    q_flip     = torch.tensor([0.0, 1.0, 0.0, 0.0], device=device).expand(batch_size, 4)
+    q_flip = torch.tensor([0.0, 1.0, 0.0, 0.0], device=device).expand(batch_size, 4)
 
     # Start upright at origin
     q = q_identity.clone()
@@ -309,45 +309,46 @@ def find_init_rob_position(
 
     for _ in range(10):
         # 1. World-frame wheel centre positions (B, 3, 3)
-        R_mat   = quat_to_rotmat(q)                                          # (B, 3, 3)
-        wc_world = torch.einsum("bij,kj->bki", R_mat, wheel_centers) \
-                   + x.unsqueeze(1)                                          # (B, 3, 3)
-        wc_xy   = wc_world[:, :, :2]                                        # (B, 3, 2)
+        R_mat = quat_to_rotmat(q)  # (B, 3, 3)
+        wc_world = torch.einsum("bij,kj->bki", R_mat, wheel_centers) + x.unsqueeze(
+            1
+        )  # (B, 3, 3)
+        wc_xy = wc_world[:, :, :2]  # (B, 3, 2)
 
         # 2. Terrain height under each wheel centre
         z_terrain = interpolate_grid(
             world_config.z_grid,
             wc_xy - grid_center,
             world_config.max_coord,
-        ).reshape(batch_size, 3)                                             # (B, 3)
+        ).reshape(batch_size, 3)  # (B, 3)
 
         # 3. Desired wheel-centre heights and plane through them
-        wc_z_target = z_terrain + R_wheel                                   # (B, 3)
-        P = torch.cat([wc_xy, wc_z_target.unsqueeze(-1)], dim=-1)          # (B, 3, 3)
+        wc_z_target = z_terrain + R_wheel  # (B, 3)
+        P = torch.cat([wc_xy, wc_z_target.unsqueeze(-1)], dim=-1)  # (B, 3, 3)
         v1 = P[:, 1, :] - P[:, 0, :]
         v2 = P[:, 2, :] - P[:, 0, :]
-        n  = torch.linalg.cross(v1, v2, dim=1)                             # (B, 3)
-        n  = torch.where(n[:, 2:3] < 0, -n, n)
-        n  = n / (n.norm(dim=1, keepdim=True) + 1e-6)
+        n = torch.linalg.cross(v1, v2, dim=1)  # (B, 3)
+        n = torch.where(n[:, 2:3] < 0, -n, n)
+        n = n / (n.norm(dim=1, keepdim=True) + 1e-6)
 
         # 4. Orientation: rotate body up-axis [0,0,1] to align with plane normal
-        z_up   = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
+        z_up = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
         v_cross = torch.linalg.cross(z_up, n, dim=1)
-        c       = (z_up * n).sum(dim=1, keepdim=True)
-        denom   = (2 * (1 + c)).clamp_min(1e-6).sqrt()
-        q_new   = torch.cat([denom * 0.5, v_cross / denom], dim=1)
-        q_new   = q_new / (q_new.norm(dim=1, keepdim=True) + 1e-6)
-        is_par  = c.abs() > (1.0 - 1e-4)
-        q_par   = torch.where(c.expand_as(q_new) > 0, q_identity, q_flip)
-        q_new   = torch.where(is_par.expand_as(q_new), q_par, q_new)
+        c = (z_up * n).sum(dim=1, keepdim=True)
+        denom = (2 * (1 + c)).clamp_min(1e-6).sqrt()
+        q_new = torch.cat([denom * 0.5, v_cross / denom], dim=1)
+        q_new = q_new / (q_new.norm(dim=1, keepdim=True) + 1e-6)
+        is_par = c.abs() > (1.0 - 1e-4)
+        q_par = torch.where(c.expand_as(q_new) > 0, q_identity, q_flip)
+        q_new = torch.where(is_par.expand_as(q_new), q_par, q_new)
 
         # 5. Body height: for each wheel, z_body = target_z - (R_new @ wc_body)_z
         #    Take the max so every wheel is at or above its terrain contact height.
-        R_new    = quat_to_rotmat(q_new)                                     # (B, 3, 3)
-        wc_rot_z = torch.einsum("bi,ki->bk", R_new[:, 2, :], wheel_centers) # (B, 3)
-        z_new    = (wc_z_target - wc_rot_z).max(dim=1).values               # (B,)
+        R_new = quat_to_rotmat(q_new)  # (B, 3, 3)
+        wc_rot_z = torch.einsum("bi,ki->bk", R_new[:, 2, :], wheel_centers)  # (B, 3)
+        z_new = (wc_z_target - wc_rot_z).max(dim=1).values  # (B,)
 
-        x_new       = torch.zeros(batch_size, 3, device=device)
+        x_new = torch.zeros(batch_size, 3, device=device)
         x_new[:, 2] = z_new
 
         # The iteration is idempotent once converged (a converged (q, x) maps to
@@ -424,9 +425,9 @@ def compute_wheel_contacts(engine, traj_se3, world_config, chunk_size=64):
         n = end - start
         Rc, xc = R[start:end], x[start:end]
         wp_rel = torch.einsum("tij,wpj->twpi", Rc, engine._wheel_pos_rel)
-        wc_world = (
-            torch.einsum("tij,wj->twi", Rc, engine._wheel_centers) + xc.unsqueeze(1)
-        )
+        wc_world = torch.einsum(
+            "tij,wj->twi", Rc, engine._wheel_centers
+        ) + xc.unsqueeze(1)
         wp_world = wp_rel + wc_world.unsqueeze(2)  # (n, W, P, 3)
         wc = WorldConfig(
             z_grid=world_config.z_grid.expand(n, -1, -1),
@@ -622,7 +623,7 @@ def add_helhest_visual_wheels(scene, parent: str = "box") -> None:
     Adds rigidly attached visual wheels for the Helhest robot to the SimView scene.
     """
     from simview import BodyShapeType, SimViewBody
-    
+
     wheels_config = {
         "left_wheel": {
             "pos": [0.4, 0.52, 0.0],

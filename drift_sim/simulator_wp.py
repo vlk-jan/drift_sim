@@ -1,15 +1,18 @@
 from typing import Optional
+
 import torch
 
 from simulator.engine import DPhysicsEngine
 from simulator.engine_wp import WarpStaticEngine
 from simulator.numerical import quat_to_rotmat
-from simulator.utils import find_init_rob_position
-from simulator.utils import PhysicsEngineConfig
-from simulator.utils import PhysicsState
-from simulator.utils import raise_to_clearance
-from simulator.utils import RobotModelConfig
-from simulator.utils import WorldConfig
+from simulator.utils import (
+    PhysicsEngineConfig,
+    PhysicsState,
+    RobotModelConfig,
+    WorldConfig,
+    find_init_rob_position,
+    raise_to_clearance,
+)
 
 
 class Simulator(torch.nn.Module):
@@ -19,10 +22,6 @@ class Simulator(torch.nn.Module):
         batch_size=1,
         device=None,
         T_horizon=5.0,
-        # Matches simulator/engine.py. The old 0.01 default put omega*dt near the
-        # semi-implicit-Euler stability edge at the stiffnesses actually used
-        # (k=4e5, m=93.8 -> omega ~ 65 rad/s), and made warp/torch rollouts
-        # incomparable. 2e-3 is the swept optimum — see PhysicsEngineConfig.dt.
         dt=2e-3,
         clip_grad_norm=None,
     ):
@@ -67,10 +66,6 @@ class Simulator(torch.nn.Module):
             robot_model, batch_size, MAX_STEPS, device, clip_grad_norm=clip_grad_norm
         )
         self.engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
-        # Torch engine instance kept purely for start-pose geometry (wheel points
-        # and terrain sampling under no_grad). It never simulates — it exists so
-        # that both wrappers seat the robot with the identical code path, which is
-        # what makes tests/test_engine_parity.py a meaningful comparison.
         self._geom = DPhysicsEngine(self.engine_config, robot_model).to(device)
         self.res = None
         self.max_coord = None
@@ -143,8 +138,7 @@ class Simulator(torch.nn.Module):
             side_range=self.side_range,
             fwd_range=self.fwd_range,
             k_friction=properties["friction"],
-            # Stiffness is not a predicted property; fall back to the fixed
-            # WorldConfig constant when no map is supplied.
+            # Stiffness is not a predicted property
             k_stiffness=properties.get("stiffness", 400_000.0),
         )
 
@@ -174,9 +168,7 @@ class Simulator(torch.nn.Module):
 
         # The plane fit only makes the wheel-triangle tangent; without this the
         # wheel circumference points start inside rough terrain and the contact
-        # springs launch the robot at t=0. The torch wrapper has always done this
-        # — the warp one used to skip it, so the two engines seated differently on
-        # every non-flat window.
+        # springs launch the robot at t=0.
         state.x = self.raise_to_clearance(state.x, state.q, world_config)
 
         # 3. Interpolate Controls
@@ -193,10 +185,7 @@ class Simulator(torch.nn.Module):
         num_steps = int(round(horizon / sim_dt))
 
         # float64 is mandatory, not tidiness: these are absolute Unix timestamps
-        # (~1.76e9), where float32 spacing is ~128 s. Building the query grid at the
-        # default dtype collapsed all `num_steps` samples onto a single value tens
-        # of seconds off, so every GT pose timestamp-matched to predicted index 0
-        # and every GT-referenced metric silently measured nothing.
+        # (~1.76e9), where float32 spacing is ~128 s.
         query_times = torch.linspace(
             ref_ts[0],
             ref_ts[0] + horizon,
