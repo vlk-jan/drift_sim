@@ -223,6 +223,7 @@ def accumulate_forces_kernel(
     dt: float,
     damping_alpha: float,
     soft_contact_sigma: float,
+    slip_ref_velocity: float,
     contact_counts: wp.array2d(dtype=float),
     force_acc: wp.array2d(dtype=wp.vec3),
     torque_acc: wp.array2d(dtype=wp.vec3),
@@ -279,7 +280,9 @@ def accumulate_forces_kernel(
     v_dir = v_tangential / (v_mag + 1.0e-6)
 
     F_N = wp.max(wp.dot(F_spring, n_surf), 0.0)
-    f_c_mag = wp.min(f_val * F_N * wp.tanh(v_mag), mass * v_mag / 3.0 / dt)
+    f_c_mag = wp.min(
+        f_val * F_N * wp.tanh(v_mag / slip_ref_velocity), mass * v_mag / 3.0 / dt
+    )
 
     F_fric = v_dir * f_c_mag
     if f_mag <= 1.0e-6:
@@ -386,6 +389,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         g,
         damping_alpha,
         soft_contact_sigma,
+        slip_ref_velocity,
         ang_damping,
         torque_limit,
         device_str,
@@ -485,6 +489,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                         dt,
                         damping_alpha,
                         soft_contact_sigma,
+                        slip_ref_velocity,
                         counts,
                     ],
                     outputs=[force_acc, torque_acc],
@@ -581,6 +586,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             None,  # g
             None,  # damping_alpha
             None,  # soft_contact_sigma
+            None,  # slip_ref_velocity
             None,  # ang_damping
             None,  # torque_limit
             None,  # device_str
@@ -654,6 +660,7 @@ class WarpStaticEngine:
             engine_config.soft_contact_sigma
             if engine_config.soft_contact_sigma is not None
             else 0.0,
+            float(getattr(engine_config, "slip_ref_velocity", 1.0) or 1.0),
             engine_config.ang_damping,
             engine_config.torque_limit,
             str(self.device),

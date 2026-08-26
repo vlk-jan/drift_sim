@@ -200,6 +200,17 @@ class PhysicsEngineConfig(BaseConfig):
         than critical damping.
         ang_damping (float): angular damping coefficient. Default is 0.1.
         soft_contact_sigma (float): soft contact sigma. Default is 0.5. This is the width of the soft contact force function.
+        slip_ref_velocity (float): slip speed (m/s) at which the tangential force
+            reaches ~76% of its Coulomb limit, via tanh(|v_t| / slip_ref).
+            Default 1.0, which is the historical behaviour (a bare tanh(|v_t|)
+            with |v_t| in m/s). NOTE that a wheel near rolling slips at ~0.01-0.3
+            m/s, where tanh gives 0.01-0.29 -- so at 1.0 the contact is closer to
+            VISCOUS than Coulomb and the effective traction is a small fraction of
+            k_friction. That is the leading explanation for why the oracle sweep
+            in probe_traction_degeneracy.py wants k_friction >= 3 (still falling
+            at 14) when a physical coefficient belongs in (0, 1]. Lower this to
+            saturate friction at realistic slip speeds. Changing it changes the
+            dynamics, so leave it at 1.0 unless you mean to.
     """
 
     num_robots: int = 1
@@ -213,6 +224,7 @@ class PhysicsEngineConfig(BaseConfig):
     damping_alpha: float = 1.0
     ang_damping: float = 0.1
     soft_contact_sigma: Optional[float] = None  # None or 0.01
+    slip_ref_velocity: float = 1.0
 
 
 # ---------------------------------------------------------------------

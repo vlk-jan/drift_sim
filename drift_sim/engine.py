@@ -253,7 +253,10 @@ class DPhysicsEngine(torch.nn.Module):
         v_dir = v_tangential / (v_mag + 1e-6)
 
         # F_c_raw_mag = mu * F_N * tanh(v)
-        F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag)
+        # tanh(|v_t| / v_ref): v_ref is the slip speed at which traction
+        # saturates. At the default 1.0 this is the historical bare tanh(|v_t|).
+        v_ref = getattr(self.config, "slip_ref_velocity", 1.0) or 1.0
+        F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag / v_ref)
 
         # Impulse limit (scalar)
         F_imp_lim = self._mass * v_mag / 3.0 / self.config.dt
