@@ -86,9 +86,7 @@ def _make_inputs(t_horizon, batch_size=1, n_ctrl=50, distinct_batch=False):
     problem and a wrapper that samples terrain[0] for every robot looks perfectly
     correct — which is exactly the bug the warp engine shipped with.
     """
-    support = torch.zeros(
-        batch_size, GRID_N, GRID_N, device=DEVICE, requires_grad=True
-    )
+    support = torch.zeros(batch_size, GRID_N, GRID_N, device=DEVICE, requires_grad=True)
     friction = torch.full(
         (batch_size, GRID_N, GRID_N), 0.6, device=DEVICE, requires_grad=True
     )
@@ -129,13 +127,15 @@ def _rollout(engine, n_steps, batch_size=1, distinct_batch=False):
     )
     traj[:, :, :3, 3].pow(2).sum().backward()
 
-    return traj[:, -1, :3, 3].detach().clone(), support.grad.clone(), friction.grad.clone()
+    return (
+        traj[:, -1, :3, 3].detach().clone(),
+        support.grad.clone(),
+        friction.grad.clone(),
+    )
 
 
 def _cos(a, b):
-    return torch.nn.functional.cosine_similarity(
-        a.flatten(), b.flatten(), dim=0
-    ).item()
+    return torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0).item()
 
 
 def _ratio(a, b):
@@ -174,8 +174,12 @@ def test_gradients_match_torch(n_steps):
     _, gs_t, gf_t = _rollout("torch", n_steps)
     _, gs_w, gf_w = _rollout("warp", n_steps)
 
-    assert torch.isfinite(gs_w).all(), f"warp support grad is non-finite at {n_steps} steps"
-    assert torch.isfinite(gf_w).all(), f"warp friction grad is non-finite at {n_steps} steps"
+    assert torch.isfinite(gs_w).all(), (
+        f"warp support grad is non-finite at {n_steps} steps"
+    )
+    assert torch.isfinite(gf_w).all(), (
+        f"warp friction grad is non-finite at {n_steps} steps"
+    )
 
     for name, gw, gt in (("support", gs_w, gs_t), ("friction", gf_w, gf_t)):
         cos, ratio = _cos(gw, gt), _ratio(gw, gt)
@@ -213,8 +217,10 @@ def test_batch_elements_are_independent(engine):
     sim1 = _make_sim(engine, t_horizon, 1)
     for b in range(B):
         traj_b, _, _, _ = sim1.predict_trajectory(
-            {"support": support[b : b + 1].detach(),
-             "friction": friction[b : b + 1].detach()},
+            {
+                "support": support[b : b + 1].detach(),
+                "friction": friction[b : b + 1].detach(),
+            },
             ctrl[b : b + 1],
             ctrl_ts[b : b + 1],
         )
@@ -273,7 +279,9 @@ def test_initial_pose_override_is_honoured(engine):
 
     base, _, _, _ = sim.predict_trajectory(props, ctrl, ctrl_ts)
     shifted, _, _, _ = sim.predict_trajectory(
-        props, ctrl, ctrl_ts,
+        props,
+        ctrl,
+        ctrl_ts,
         initial_state={"x": torch.tensor([[3.0, -2.0, 0.0]], device=DEVICE)},
     )
     dxy = (shifted[0, 0, :2, 3] - base[0, 0, :2, 3]).detach()
@@ -404,7 +412,9 @@ def test_warp_kernels_have_no_dynamic_loops():
     import ast
     import pathlib
 
-    src_path = pathlib.Path(__file__).resolve().parents[1] / "simulator" / "engine_wp.py"
+    src_path = (
+        pathlib.Path(__file__).resolve().parents[1] / "simulator" / "engine_wp.py"
+    )
     tree = ast.parse(src_path.read_text())
 
     def is_wp_kernel(node):
@@ -440,7 +450,9 @@ def test_warp_kernels_have_no_dynamic_loops():
             if not isinstance(node, ast.For):
                 continue
             it = node.iter
-            if not (isinstance(it, ast.Call) and getattr(it.func, "id", None) == "range"):
+            if not (
+                isinstance(it, ast.Call) and getattr(it.func, "id", None) == "range"
+            ):
                 continue
             for arg in it.args:
                 if isinstance(arg, ast.Constant):

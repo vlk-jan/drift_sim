@@ -46,8 +46,10 @@ def test_untransposed_grid_is_sampled_x_swapped():
     # WorldConfig makes the engine feel the +x ramp as a +y ramp.
     n, res = 41, 0.1
     c = (n - 1) / 2.0
-    wc = WorldConfig(z_grid=_x_ramp_heightmap(n, res)[None], grid_res=res, max_coord=c * res)
-    assert abs(_sample_height(wc, 1.0, 0.0)) < 0.05        # +x reads flat
+    wc = WorldConfig(
+        z_grid=_x_ramp_heightmap(n, res)[None], grid_res=res, max_coord=c * res
+    )
+    assert abs(_sample_height(wc, 1.0, 0.0)) < 0.05  # +x reads flat
     assert abs(_sample_height(wc, 0.0, 1.0) - 1.0) < 0.05  # ramp leaked to +y
 
 
@@ -56,7 +58,9 @@ def test_transpose_1_2_puts_grid_in_simulator_frame():
     # building the WorldConfig so a +x ramp is sampled along +x.
     n, res = 41, 0.1
     c = (n - 1) / 2.0
-    z = _x_ramp_heightmap(n, res)[None].transpose(1, 2)  # what trainer/apply_terrain_props do
+    z = _x_ramp_heightmap(n, res)[None].transpose(
+        1, 2
+    )  # what trainer/apply_terrain_props do
     wc = WorldConfig(z_grid=z, grid_res=res, max_coord=c * res)
     assert abs(_sample_height(wc, 1.0, 0.0) - 1.0) < 0.05  # +x is high
-    assert abs(_sample_height(wc, 0.0, 1.0)) < 0.05        # +y is flat
+    assert abs(_sample_height(wc, 0.0, 1.0)) < 0.05  # +y is flat
