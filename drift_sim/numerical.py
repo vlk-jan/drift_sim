@@ -38,7 +38,8 @@ def integrate_quaternion(
 ) -> torch.Tensor:
     """
     Integrate quaternion using the quaternion derivative.
-    Optimized to use vectorized operations and avoid unnecessary intermediate tensor allocations.
+    Optimized to use vectorized operations and avoid unnecessary intermediate tensor
+        allocations.
 
     Parameters:
         - q: Quaternion. Shape [B, 4].
@@ -148,7 +149,8 @@ def interpolate_surface_normals(
 
     Parameters:
     - grid_normals: torch.Tensor of normals (B, 3, H, W).
-    - query: Tensor of desired point coordinates for interpolation (3D array), (B, N, 2).
+    - query: Tensor of desired point coordinates for interpolation (3D array), (B, N,
+        2).
 
     Returns:
     - Surface normals at the queried coordinates (B, N, 3).

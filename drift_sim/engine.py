@@ -87,7 +87,8 @@ class DPhysicsEngine(torch.nn.Module):
 
         Uses the precomputed 6-channel ``world_config._sample_grid``
         (z, nx, ny, nz, friction, stiffness) to replace the three separate
-        grid_sample calls previously needed for contact detection and coefficient lookup.
+        grid_sample calls previously needed for contact detection and coefficient
+            lookup.
 
         Args:
             wheel_points:  (B, W, P, 3) world-frame positions of wheel sample points
@@ -240,8 +241,10 @@ class DPhysicsEngine(torch.nn.Module):
         F_N = norms_spring.clamp_min(1e-9)
 
         # F_fric = mu * F_N * tanh(v_rel)
-        # Friction is a tangential force — project contact velocity onto the terrain surface
-        # plane before computing direction and magnitude.  Using the full 3D velocity would
+        # Friction is a tangential force — project contact velocity onto the terrain
+        # surface
+        # plane before computing direction and magnitude.  Using the full 3D velocity
+        # would
         # inject a spurious normal component: when the body has a downward z-velocity,
         # v_dir[z] < 0, so Fs_fric[z] < 0, and F_net[z] = F_spring[z] - Fs_fric[z] gains
         # an unphysical extra-upward term that can launch the robot off the terrain.

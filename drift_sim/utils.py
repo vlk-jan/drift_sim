@@ -15,9 +15,7 @@ from simulator.numerical import (
 # Configuration Classes
 # ---------------------------------------------------------------------
 class BaseConfig:
-    """
-    Base configuration class. This class is used to store the configuration of the simulation.
-    """
+    """Base class holding a chunk of the simulation configuration."""
 
     def to(self, device: Union[torch.device, str]):
         """
@@ -33,19 +31,15 @@ class BaseConfig:
 
 @dataclass
 class WorldConfig(BaseConfig):
-    """
-    World configuration. Contains the physical constants of the world, coordinates of the world frame etc.
+    """Physical constants of the world and the coordinates of the world frame.
 
-    **Note**:
-        1) The convention for grids is torch's "xy" indexing of the meshgrid. This means that the first
-            dimension of the grid corresponds to the y-coordinate and the second dimension corresponds to the
-            x-coordinate. The coordinate increases with increasing index, i.e. the Y down and X right. Generate
-            them with torch.meshgrid(y, x, indexing="xy").
-        2) origin [0,0] is at the center of the grid.
+    Grids use torch's "xy" meshgrid indexing: the first dimension is y and the
+    second is x, both increasing with index (Y down, X right). Build them with
+    ``torch.meshgrid(y, x, indexing="xy")``. Origin [0, 0] is the grid center.
 
     z_grid (torch.Tensor): z-coordinates of the grid.
-    normals (torch.Tensor): normals of the terrain. Shape (B, 3, grid_dim, grid_dim).
-    grid_res (float): resolution of the grid in meters. Represents the metric distance between 2 centers of adjacent grid cells.
+    normals (torch.Tensor): terrain normals, (B, 3, grid_dim, grid_dim).
+    grid_res (float): metric distance between adjacent cell centers.
     max_coord (float): distance from the grid center to the outermost cell center
         (grid_sample align_corners=True convention). Every sampler normalises a
         metric query as ``u = (xy - grid_center) / max_coord`` and calls
@@ -128,9 +122,11 @@ class WorldConfig(BaseConfig):
 
     def _compute_heightmap_gradients(self, z_grid: torch.Tensor) -> torch.Tensor:
         """
-        Computes the gradients of a heightmap along the x and y axes using torch.gradient.
+        Computes the gradients of a heightmap along the x and y axes using
+            torch.gradient.
 
-        **Note**: The input grid is assumed to use torch's "xy" indexing convention, i.e., the first dimension is
+        **Note**: The input grid is assumed to use torch's "xy" indexing convention,
+            i.e., the first dimension is
                    the y-axis and the second dimension is the x-axis.
 
         Parameters:
@@ -161,12 +157,14 @@ class WorldConfig(BaseConfig):
         self, ij: Union[torch.IntTensor, torch.LongTensor]
     ) -> torch.FloatTensor:
         """
-        ij is assumed to have the shape (N, B, 2) where N is the number of points and B is the batch size.
+        ij is assumed to have the shape (N, B, 2) where N is the number of points and B
+            is the batch size.
         """
         N, B = ij.shape[:-1]
 
         # Analytical calculation for x and y
-        # ij[..., 1] is x-index, ij[..., 0] is y-index (due to "xy" indexing convention in torch)
+        # ij[..., 1] is x-index, ij[..., 0] is y-index (due to "xy" indexing convention
+        # in torch)
         center = (self.grid_size - 1) / 2.0
         x = (ij[..., 1] - center) * self.grid_res
         y = (ij[..., 0] - center) * self.grid_res
@@ -189,17 +187,19 @@ class RobotModelConfig(BaseConfig):
 
 @dataclass
 class PhysicsEngineConfig(BaseConfig):
-    """
-    Physics Engine configuration. Contains the physical constants of the simulation, such as gravity, time step, etc.
+    """Physical constants of the simulation: gravity, time step, limits.
 
     Attributes:
         dt (float): time step for numerical integration. Default is 0.01. (100 Hz)
         gravity (float): acceleration due to gravity. Default is 9.81 m/s^2.
-        torque_limit (float): torque limit that can be generated on CoG. The physics engine clips it to this value. Default is 200.0 Nm.
-        damping_alpha (float): damping coefficient modifier, should be between larger than 1.0. Applies damping alpha times higher
+        torque_limit (float): torque limit that can be generated on CoG. The physics
+            engine clips it to this value. Default is 200.0 Nm.
+        damping_alpha (float): damping coefficient modifier, must be > 1.0.
+            Applies damping alpha times higher
         than critical damping.
         ang_damping (float): angular damping coefficient. Default is 0.1.
-        soft_contact_sigma (float): soft contact sigma. Default is 0.5. This is the width of the soft contact force function.
+        soft_contact_sigma (float): soft contact sigma. Default is 0.5. This is the
+            width of the soft contact force function.
         slip_ref_velocity (float): slip speed (m/s) at which the tangential force
             reaches ~76% of its Coulomb limit, via tanh(|v_t| / slip_ref).
             Default 1.0, which is the historical behaviour (a bare tanh(|v_t|)
@@ -236,9 +236,12 @@ class PhysicsState(TensorClass):
     Attributes:
         x (torch.Tensor): Position of the robot in the world frame. Shape (B, 3).
         xd (torch.Tensor): Velocity of the robot in the world frame. Shape (B, 3).
-        q (torch.Tensor): Orientation quaternion of the robot in the world frame. Shape (B, 4).
-        omega (torch.Tensor): Angular velocity of the robot in the world frame. Shape (B, 3).
-        wheel_omega (torch.Tensor): Angular velocities of individual wheels. Shape (B, 3).
+        q (torch.Tensor): Orientation quaternion of the robot in the world frame. Shape
+            (B, 4).
+        omega (torch.Tensor): Angular velocity of the robot in the world frame. Shape
+            (B, 3).
+        wheel_omega (torch.Tensor): Angular velocities of individual wheels. Shape (B,
+            3).
     """
 
     x: torch.Tensor
@@ -279,8 +282,10 @@ class PhysicsStateDer(TensorClass):
 
     Attributes:
         xdd (torch.tensor): Acceleration of the robot in the world frame. Shape (B, 3).
-        omega_d (torch.tensor): Derivative of the angular velocity of the robot in the world frame. Shape (B, 3).
-        wheel_omega_d (torch.Tensor): Angular acceleration of the 3 wheels. Shape (B, 3).
+        omega_d (torch.tensor): Derivative of the angular velocity of the robot in the
+            world frame. Shape (B, 3).
+        wheel_omega_d (torch.Tensor): Angular acceleration of the 3 wheels. Shape (B,
+            3).
     """
 
     xdd: torch.Tensor

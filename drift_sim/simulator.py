@@ -86,8 +86,10 @@ class Simulator(torch.nn.Module):
 
     def _prepare_inputs(self, vel_ctrl, vel_ts, T_horizon=None):
         """
-        Prepare control inputs for simulation. This may include resampling or interpolation such
-        that each input has the same number of simulation steps and these steps align with the
+        Prepare control inputs for simulation. This may include resampling or
+            interpolation such
+        that each input has the same number of simulation steps and these steps align
+            with the
         physics engine's time step.
 
         Parameters
@@ -137,7 +139,8 @@ class Simulator(torch.nn.Module):
         idx_right = torch.searchsorted(vel_ts, target_ts_batch, right=True)
 
         # Clamp indices to valid range for interpolation [0, S-2]
-        # idx_right corresponds to 'next' element, so we want idx_left to be idx_right - 1
+        # idx_right corresponds to 'next' element, so we want idx_left to be idx_right -
+        # 1
         idx_left = (idx_right - 1).clamp(0, S - 2)
         idx_right = idx_left + 1
 
@@ -223,12 +226,15 @@ class Simulator(torch.nn.Module):
         ----------
         properties : dict
             A dictionary containing terrain properties:
-            - "support": torch.Tensor of shape (B, H, W) representing the support surface (height_map - height_residual).
-            - "friction": torch.Tensor of shape (B, H, W) or a scalar representing friction coefficients.
+            - "support": torch.Tensor of shape (B, H, W) representing the support
+                surface (height_map - height_residual).
+            - "friction": torch.Tensor of shape (B, H, W) or a scalar representing
+                friction coefficients.
             - "stiffness": optional (B, H, W) or scalar; if absent, the fixed
               WorldConfig constant is used (stiffness is not predicted).
         vel_ctrl : torch.Tensor
-            Control inputs for wheel velocities. Shape (B, Steps, 3) where 3 is the number of wheels.
+            Control inputs for wheel velocities. Shape (B, Steps, 3) where 3 is the
+                number of wheels.
         vel_ts : torch.Tensor
             Timestamps associated with the control inputs. Shape (B, Steps).
         initial_state : dict, optional

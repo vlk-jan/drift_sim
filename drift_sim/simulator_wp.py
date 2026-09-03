@@ -119,7 +119,8 @@ class Simulator(torch.nn.Module):
             Absolute (Unix) seconds, and every batch element is its own window
             with its own start time — controls are resampled per element.
         initial_state : dict, optional
-            Initial state for the simulator. Can contain "xd", "omega", and "wheel_omega".
+            Initial state for the simulator. Can contain "xd", "omega", and
+                "wheel_omega".
 
         Returns:
         -------
