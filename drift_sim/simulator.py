@@ -28,10 +28,17 @@ class Simulator(torch.nn.Module):
         if robot == "helhest":
             robot_model = RobotModelConfig(
                 mass=93.8,
-                cog=torch.tensor([0.145, 0.009, 0.0]),
-                wheel_radii=torch.tensor([0.3685, 0.3685, 0.3685]),
+                # cog was given relative to the OLD wheel layout (front axle at
+                # x=0.4); in the URDF frame (front axle at x=0) it is 0.255 m behind
+                # the front axle -- the kinematic engine already carried -0.255.
+                cog=torch.tensor([-0.255, 0.009, 0.0]),
+                wheel_radii=torch.tensor([0.36, 0.36, 0.36]),
+                # base_link IS the front axle (robot URDF, /robot_description in
+                # every bag): front wheels (0, +-0.36), rear (-0.697, 0), r 0.36.
+                # The earlier (0.4, +-0.52) / (-0.5, 0) / 0.3685 had no source and put
+                # every wheel contact 0.2-0.4 m ahead of the wheels (found 2026-09-04).
                 wheel_centers=torch.tensor(
-                    [[0.4, 0.52, 0.0], [0.4, -0.52, 0.0], [-0.5, 0.0, 0.0]]
+                    [[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]
                 ),
                 wheel_inertias=torch.tensor([0.2, 0.2, 0.2]),
                 inertia_tensor=torch.tensor(

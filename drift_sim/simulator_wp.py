@@ -30,10 +30,10 @@ class Simulator(torch.nn.Module):
         if robot == "helhest":
             robot_model = RobotModelConfig(
                 mass=93.8,
-                cog=torch.tensor([0.145, 0.009, 0.0]),
-                wheel_radii=torch.tensor([0.3685, 0.3685, 0.3685]),
+                cog=torch.tensor([-0.255, 0.009, 0.0]),  # URDF frame, see simulator.py
+                wheel_radii=torch.tensor([0.36, 0.36, 0.36]),
                 wheel_centers=torch.tensor(
-                    [[0.4, 0.52, 0.0], [0.4, -0.52, 0.0], [-0.5, 0.0, 0.0]]
+                    [[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]  # URDF, see simulator.py
                 ),
                 wheel_inertias=torch.tensor([0.2, 0.2, 0.2]),
                 inertia_tensor=torch.tensor(
