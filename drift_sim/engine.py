@@ -63,20 +63,6 @@ class DPhysicsEngine(torch.nn.Module):
         # (n_wheels, n_points, 3)
         return torch.stack([x, y, z], dim=-1)
 
-    def _T_onto_normal(
-        self, vec: torch.Tensor, normal_vec: torch.Tensor
-    ) -> torch.Tensor:
-        """Transform vector onto a vector (i.e. via projection)."""
-        n = normal_vec / torch.norm(normal_vec, dim=-1, keepdim=True).clamp_min(1e-9)
-        dot = (vec * n).sum(dim=-1, keepdim=True)
-        return dot
-
-    def _T_onto_plane(
-        self, vec: torch.Tensor, normal_vec: torch.Tensor
-    ) -> torch.Tensor:
-        """Transform vector onto a plane given by normal vector (i.e. via rejection on it)."""
-        return vec - self._T_onto_normal(vec, normal_vec)
-
     def _sample_terrain(
         self,
         wheel_points: torch.Tensor,
@@ -140,15 +126,19 @@ class DPhysicsEngine(torch.nn.Module):
         xd_points: torch.Tensor,
         normals: torch.Tensor,
         stiffness: torch.Tensor,
+        in_contact: torch.Tensor,
+        num_contacts: torch.Tensor,
     ) -> torch.Tensor:
         """
         Calculate the spring force acting on the robot points.
+
+        `in_contact` is a HARD (dh < 0) step, so the contact BOUNDARY is not
+        differentiable whatever soft_contact_sigma is. And sigma is a width in
+        NEWTONS: with the force divided by the contact count each contributing
+        point carries ~mg = 920 N, so the production-adjacent 0.01 leaves the
+        rollout bit-identical to hard ReLU (measured, job 11564503). See
+        PhysicsEngineConfig.soft_contact_sigma.
         """
-        in_contact = (dh_points < 0).float()  # shape (B, W, P, 1)
-
-        # Count total contacts across all wheels and points to distribute stiffness
-        num_contacts = in_contact.sum(dim=(1, 2), keepdim=True).clamp_min(1)
-
         k = stiffness.unsqueeze(-1)  # shape (B, W, 1, 1)
         b = self.config.damping_alpha * 2 * (self._mass * k) ** 0.5
 
@@ -230,9 +220,18 @@ class DPhysicsEngine(torch.nn.Module):
 
         vels_wheel_contact = v_rigid + v_spin
 
+        # Hard contact gate, shared by the spring force and the impulse limit
+        in_contact = (dh_points < 0).float()  # (B, W, P, 1)
+        num_contacts = in_contact.sum(dim=(1, 2), keepdim=True).clamp_min(1)
+
         # F_springs will be (B, W, P, 3)
         F_springs = self._calculate_spring_force(
-            dh_points, vels_wheel_contact, normals, stif_coeffs
+            dh_points,
+            vels_wheel_contact,
+            normals,
+            stif_coeffs,
+            in_contact,
+            num_contacts,
         )
 
         # Normal Force Magnitude: Project Spring Force onto Surface Normal
@@ -261,8 +260,14 @@ class DPhysicsEngine(torch.nn.Module):
         v_ref = getattr(self.config, "slip_ref_velocity", 1.0) or 1.0
         F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag / v_ref)
 
-        # Impulse limit (scalar)
-        F_imp_lim = self._mass * v_mag / 3.0 / self.config.dt
+        # Impulse limit: friction may not do more than kill the tangential
+        # velocity of this point within one step. The momentum share of one
+        # contact point is m / num_contacts, so the divisor is the CONTACT
+        # COUNT, not the wheel count (it used to be a hard 3). Measured inert at
+        # dt 2e-3 either way -- F_N per point is ~mg/48, so the friction force is
+        # ~2 orders below the cap; it starts to bind at much larger dt. Pinned by
+        # tests/test_engine_invariants.py::test_impulse_limit_is_inert_at_training_dt.
+        F_imp_lim = self._mass * v_mag / num_contacts / self.config.dt
 
         # Clamp magnitude
         F_c_mag = torch.min(F_c_mag, F_imp_lim)
@@ -283,12 +288,13 @@ class DPhysicsEngine(torch.nn.Module):
         # Sum over wheels (dim 1) and points (dim 2)
         F_net_world = F_grav_batch + F_net_wheels.sum(dim=(1, 2))
 
-        # Acceleration
-        xdd = F_net_world / self._mass
+        # Acceleration of the CENTRE OF MASS
+        xdd_com = F_net_world / self._mass
 
         # Angular Dynamics
         # CoM in world: state.x + R @ cog
-        com_world = state.x + (R @ self._cog)
+        r_com = R @ self._cog  # body origin -> CoM, world frame (B, 3)
+        com_world = state.x + r_com
 
         # r: Vector from CoM to Contact Points
         r = wheel_points - com_world.unsqueeze(1).unsqueeze(1)
@@ -313,6 +319,22 @@ class DPhysicsEngine(torch.nn.Module):
 
         I_world_inv = R @ self._I_body_inv @ R_T
         omega_d = (I_world_inv @ (M_net - w_x_Iw).unsqueeze(-1)).squeeze(-1)
+
+        # state.x is the BODY ORIGIN (base_link = the front axle), not the CoM,
+        # so a_origin = a_com - alpha x r - omega x (omega x r) with
+        # r = R @ cog. The transfer terms were dropped historically; every
+        # production checkpoint was trained without them, so this is OFF by
+        # default and turning it on changes the dynamics.
+        if getattr(self.config, "com_transfer", False):
+            xdd = (
+                xdd_com
+                - torch.linalg.cross(omega_d, r_com)
+                - torch.linalg.cross(
+                    state.omega, torch.linalg.cross(state.omega, r_com)
+                )
+            )
+        else:
+            xdd = xdd_com
 
         # next state derivative
         next_state_der = PhysicsStateDer(

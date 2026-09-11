@@ -4,6 +4,18 @@ Same physics, ~10x cheaper per rollout. The two engines are kept formula-for-for
 identical on purpose — tests/test_engine_parity.py checks forward poses *and*
 gradients between them, and any deliberate divergence here shows up there.
 
+That claim was false until 2026-09-10 for the contact model: the torch WRAPPER
+(models/simulator.py) hard-coded soft_contact_sigma=0.01 while the warp wrapper
+left it unset, so torch ran softplus contact and warp ran hard ReLU. The forwards
+agree to 2e-3 m, so the parity test could not see it. Both wrappers now default to
+the HARD contact every `--engine warp` production checkpoint was trained under.
+Measured afterwards (job 11564503): at sigma 0.01 the two contact models are
+bit-identical anyway -- sigma is a width in NEWTONS and each contributing contact
+point carries ~mg = 920 N, so the softplus is the identity there. The divergence
+was real in the configuration and inert in the numbers. The guard is
+tests/test_engine_parity.py::test_engines_agree_on_the_contact_model_where_it_is_visible,
+which compares the engines at a sigma the force actually responds to.
+
 Structure, and why it matters
 -----------------------------
 The rollout is driven by **one kernel launch per timestep, recorded on a wp.Tape**,
@@ -31,10 +43,18 @@ used for online adaptation (B=1) the whole rollout ran on a single CUDA thread.
 forbids reintroducing either loop.
 """
 
+import warnings
+
 import torch
 import warp as wp
 
 wp.init()
+
+# The warp adjoint zeroes non-finite gradients (see WarpTrajectoryFunc.backward);
+# the torch engine propagates them and lets utils/trainer.py's isfinite check
+# zero them one level up. The two therefore fail differently, so the zeroing is
+# announced once per process instead of happening silently.
+_WARNED_NONFINITE_GRAD = False
 
 # Compile-time constants, so the loops that use them unroll. Do NOT turn these
 # back into kernel parameters (see module docstring).
@@ -280,8 +300,11 @@ def accumulate_forces_kernel(
     v_dir = v_tangential / (v_mag + 1.0e-6)
 
     F_N = wp.max(wp.dot(F_spring, n_surf), 0.0)
+    # Impulse limit: the momentum share of one contact point is mass / count,
+    # so the divisor is the CONTACT COUNT (it used to be a hard 3). Inert at
+    # dt 2e-3 either way; see simulator/engine.py for the numbers.
     f_c_mag = wp.min(
-        f_val * F_N * wp.tanh(v_mag / slip_ref_velocity), mass * v_mag / 3.0 / dt
+        f_val * F_N * wp.tanh(v_mag / slip_ref_velocity), mass * v_mag / count / dt
     )
 
     F_fric = v_dir * f_c_mag
@@ -307,6 +330,8 @@ def integrate_kernel(
     dt: float,
     ang_damping: float,
     torque_limit: float,
+    cog: wp.vec3,
+    com_transfer: float,
     force_acc: wp.array2d(dtype=wp.vec3),
     torque_acc: wp.array2d(dtype=wp.vec3),
 ):
@@ -332,7 +357,16 @@ def integrate_kernel(
 
     omega_d = I_inv_world * (T_total - wp.cross(omega, I_world * omega))
 
-    next_xd = xd + (F_total / mass) * dt
+    # state.x is the BODY ORIGIN, not the CoM. com_transfer > 0 subtracts the
+    # alpha x r + omega x (omega x r) transfer, r = quat_rotate(q, cog); off by
+    # default because every production checkpoint trained without it. Same
+    # switch as PhysicsEngineConfig.com_transfer / simulator/engine.py.
+    acc = F_total / mass
+    if com_transfer > 0.0:
+        r_com = wp.quat_rotate(q, cog)
+        acc = acc - wp.cross(omega_d, r_com) - wp.cross(omega, wp.cross(omega, r_com))
+
+    next_xd = xd + acc * dt
     next_omega = omega + omega_d * dt
     # Matches the torch engine's clamps; a runaway step would otherwise poison
     # every later step of the rollout and its adjoint.
@@ -392,6 +426,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         slip_ref_velocity,
         ang_damping,
         torque_limit,
+        com_transfer,
         device_str,
         clip_grad_norm,
     ):
@@ -511,6 +546,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                         dt,
                         ang_damping,
                         torque_limit,
+                        cog_wp,
+                        com_transfer,
                         force_acc,
                         torque_acc,
                     ],
@@ -552,10 +589,23 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         ctx.tape.backward()
 
         def get_grad(name):
+            global _WARNED_NONFINITE_GRAD
             arr = ctx.wp_inputs[name]
             if not (arr.requires_grad and arr.grad is not None):
                 return None
             g = wp.to_torch(arr.grad).clone().detach()
+            nonfinite = int((~torch.isfinite(g)).sum())
+            if nonfinite and not _WARNED_NONFINITE_GRAD:
+                _WARNED_NONFINITE_GRAD = True
+                warnings.warn(
+                    f"warp engine: zeroing {nonfinite} non-finite gradient "
+                    f"entries in '{name}'. The torch engine would propagate "
+                    "them instead (utils/trainer.py zeroes them one level up), "
+                    "so the two engines fail differently. Warned once per "
+                    "process.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
             if ctx.clip_grad_norm is not None:
                 norm = g.norm()
@@ -589,6 +639,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             None,  # slip_ref_velocity
             None,  # ang_damping
             None,  # torque_limit
+            None,  # com_transfer
             None,  # device_str
             None,  # clip_grad_norm
         )
@@ -663,6 +714,7 @@ class WarpStaticEngine:
             float(getattr(engine_config, "slip_ref_velocity", 1.0) or 1.0),
             engine_config.ang_damping,
             engine_config.torque_limit,
+            1.0 if getattr(engine_config, "com_transfer", False) else 0.0,
             str(self.device),
             self.clip_grad_norm,
         )

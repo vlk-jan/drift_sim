@@ -26,6 +26,8 @@ Stiffness is deliberately not covered: it is no longer a predicted or adaptable
 property (see ADAPT_HEADS in utils/experiment.py), only a simulator input.
 """
 
+import warnings
+
 import pytest
 import torch
 
@@ -42,18 +44,47 @@ GRID_N = 128
 RES = 0.1
 MAX_COORD = 6.4
 DT = 1e-3
+# Training runs 2e-3 (PhysicsEngineConfig.dt, chosen by sweep_dt.py). Parity was
+# only ever checked at 1e-3, so a divergence that only shows up at the step size
+# production uses would have gone unseen. Both are covered now.
+DT_TRAIN = 2e-3
+DTS = (DT, DT_TRAIN)
 
-# The forward passes already agree to ~3e-4 m over a 1 s rollout; anything much
-# looser would stop catching real physics divergence.
-POS_ATOL = 2e-3
-# Gradient direction is what the optimizer actually follows, so it is the tight
-# bound; magnitude is allowed a factor of 2 to absorb contact-boundary jitter
-# (the hard `dist < 0` gate can flip a sample point between the two engines).
-GRAD_COS_MIN = 0.99
-GRAD_RATIO_RANGE = (0.5, 2.0)
+# MEASURED, not aspirational: scripts/analysis/measure_engine_parity.py, job
+# 11564503 (gpufast, V100, IEEE fp32, slurm/out/audit_engine_parity_11564503.out).
+# Worst case over dt in {1e-3, 2e-3} x steps in {50, 250, 1000}:
+#
+#   final pose        1.6e-4 m          (at dt 2e-3, 1000 steps)
+#   support grad      cosine 0.999384   norm ratio 1.0255
+#   friction grad     cosine 0.999949   norm ratio 1.0119
+#   warp self-vs-self 7.5e-9 m          (the nondeterminism floor)
+#
+# The old bounds (2e-3 m, cosine 0.99, ratio 0.5..2.0) were looser than the TF32
+# effect the configs were changed to avoid (cosine 0.99892, ratio 1.018), so a
+# TF32-sized divergence would have passed. GRAD_COS_MIN is now tighter than that
+# effect. GRAD_RATIO_RANGE cannot be: the engines' own worst norm ratio (1.0255)
+# is already larger than TF32's, so 1.05 is the tightest honest bound.
+POS_ATOL = 5e-4
+GRAD_COS_MIN = 0.999
+GRAD_RATIO_RANGE = (0.95, 1.05)
+# The batched (B=4, distinct terrain per element) rollouts were not part of the
+# measurement above and stack four problems' worth of contact-boundary jitter
+# into one norm, so they keep a looser magnitude bound.
+GRAD_RATIO_RANGE_BATCHED = (0.9, 1.1)
+# soft_contact_sigma is a width in NEWTONS, not metres: the softplus is applied
+# to the force magnitude with beta = 1/sigma. The spring force is divided by the
+# contact count, so each contributing point carries ~mg = 920 N at rest -- five
+# orders of magnitude above sigma = 0.01, where softplus is the identity to
+# within 1e-40 N. A sigma has to be comparable to 920 N to change anything;
+# softplus(0) = sigma*log(2), so above ~1300 the robot cannot rest at all.
+# 1000 sits just inside that: it moves the settled pose by ~1.3 mm.
+VISIBLE_SIGMA = 1000.0
+# Measured floor for "the two rollouts are the same run": torch self-vs-self is
+# bit-identical, warp self-vs-self 7.5e-9 m (job 11564503, section 7).
+SAME_RUN_ATOL = 1e-4
 
 
-def _make_sim(engine, t_horizon, batch_size=1):
+def _make_sim(engine, t_horizon, batch_size=1, dt=DT, soft_contact_sigma=None):
     if engine == "torch":
         from models.simulator import Simulator
     else:
@@ -64,7 +95,8 @@ def _make_sim(engine, t_horizon, batch_size=1):
         batch_size=batch_size,
         device=DEVICE,
         T_horizon=t_horizon,
-        dt=DT,
+        dt=dt,
+        soft_contact_sigma=soft_contact_sigma,
     )
     sim.update_world_config(
         res=RES,
@@ -75,7 +107,7 @@ def _make_sim(engine, t_horizon, batch_size=1):
     return sim
 
 
-def _make_inputs(t_horizon, batch_size=1, n_ctrl=50, distinct_batch=False):
+def _make_inputs(t_horizon, batch_size=1, n_ctrl=50, distinct_batch=False, dt=DT):
     """Flat terrain, forward drive with a slight turn.
 
     The turn matters: on a perfectly straight drive the friction gradient is
@@ -106,21 +138,31 @@ def _make_inputs(t_horizon, batch_size=1, n_ctrl=50, distinct_batch=False):
         friction = fr.expand(batch_size, GRID_N, GRID_N).clone().requires_grad_(True)
         ctrl = ctrl * torch.linspace(0.8, 1.2, batch_size, device=DEVICE).view(-1, 1, 1)
 
-    ctrl_ts = torch.linspace(0.0, max(t_horizon, DT), n_ctrl, device=DEVICE)
+    ctrl_ts = torch.linspace(0.0, max(t_horizon, dt), n_ctrl, device=DEVICE)
     ctrl_ts = ctrl_ts.unsqueeze(0).expand(batch_size, -1)
     return support, friction, ctrl, ctrl_ts
 
 
-def _rollout(engine, n_steps, batch_size=1, distinct_batch=False):
+def _rollout(
+    engine,
+    n_steps,
+    batch_size=1,
+    distinct_batch=False,
+    dt=DT,
+    soft_contact_sigma=None,
+    flat=False,
+):
     """Run one rollout and backprop a trajectory loss.
 
     Returns (final_pos_per_batch, grad_support, grad_friction).
     """
-    t_horizon = n_steps * DT
-    sim = _make_sim(engine, t_horizon, batch_size)
+    t_horizon = n_steps * dt
+    sim = _make_sim(engine, t_horizon, batch_size, dt, soft_contact_sigma)
     support, friction, ctrl, ctrl_ts = _make_inputs(
-        t_horizon, batch_size, distinct_batch=distinct_batch
+        t_horizon, batch_size, distinct_batch=distinct_batch, dt=dt
     )
+    if flat:
+        support = torch.zeros_like(support, requires_grad=True)
 
     traj, _, _, _ = sim.predict_trajectory(
         {"support": support, "friction": friction}, ctrl, ctrl_ts
@@ -148,14 +190,15 @@ def _ratio(a, b):
 
 
 @requires_cuda
+@pytest.mark.parametrize("dt", DTS)
 @pytest.mark.parametrize("n_steps", [50, 250, 1000])
-def test_forward_pose_matches_torch(n_steps):
-    pos_t, _, _ = _rollout("torch", n_steps)
-    pos_w, _, _ = _rollout("warp", n_steps)
+def test_forward_pose_matches_torch(n_steps, dt):
+    pos_t, _, _ = _rollout("torch", n_steps, dt=dt)
+    pos_w, _, _ = _rollout("warp", n_steps, dt=dt)
     err = (pos_w - pos_t).norm().item()
     assert err < POS_ATOL, (
         f"warp/torch final pose diverged by {err:.3e} m over {n_steps} steps "
-        f"(torch={pos_t.tolist()}, warp={pos_w.tolist()})"
+        f"at dt={dt:g} (torch={pos_t.tolist()}, warp={pos_w.tolist()})"
     )
 
 
@@ -169,27 +212,28 @@ def test_forward_pose_matches_torch(n_steps):
 # really use, and is where it returned NaN. Both must be covered or the
 # regression walks straight back in.
 @requires_cuda
+@pytest.mark.parametrize("dt", DTS)
 @pytest.mark.parametrize("n_steps", [50, 100, 250, 1000])
-def test_gradients_match_torch(n_steps):
-    _, gs_t, gf_t = _rollout("torch", n_steps)
-    _, gs_w, gf_w = _rollout("warp", n_steps)
+def test_gradients_match_torch(n_steps, dt):
+    _, gs_t, gf_t = _rollout("torch", n_steps, dt=dt)
+    _, gs_w, gf_w = _rollout("warp", n_steps, dt=dt)
 
     assert torch.isfinite(gs_w).all(), (
-        f"warp support grad is non-finite at {n_steps} steps"
+        f"warp support grad is non-finite at {n_steps} steps, dt={dt:g}"
     )
     assert torch.isfinite(gf_w).all(), (
-        f"warp friction grad is non-finite at {n_steps} steps"
+        f"warp friction grad is non-finite at {n_steps} steps, dt={dt:g}"
     )
 
     for name, gw, gt in (("support", gs_w, gs_t), ("friction", gf_w, gf_t)):
         cos, ratio = _cos(gw, gt), _ratio(gw, gt)
         assert cos > GRAD_COS_MIN, (
-            f"{name} gradient direction diverged at {n_steps} steps: "
+            f"{name} gradient direction diverged at {n_steps} steps, dt={dt:g}: "
             f"cosine={cos:.4f} (need > {GRAD_COS_MIN})"
         )
         lo, hi = GRAD_RATIO_RANGE
         assert lo < ratio < hi, (
-            f"{name} gradient magnitude diverged at {n_steps} steps: "
+            f"{name} gradient magnitude diverged at {n_steps} steps, dt={dt:g}: "
             f"‖warp‖/‖torch‖={ratio:.3e} (need {lo}..{hi})"
         )
 
@@ -257,7 +301,7 @@ def test_gradients_match_torch_batched(n_steps):
                 f"steps: cosine={cos:.4f}"
             )
         ratio = _ratio(gw, gt)
-        lo, hi = GRAD_RATIO_RANGE
+        lo, hi = GRAD_RATIO_RANGE_BATCHED
         assert lo < ratio < hi, f"{name} gradient magnitude ratio {ratio:.3e}"
 
 
@@ -340,9 +384,9 @@ def test_gradient_matches_finite_differences(engine):
     test above trusts, and nothing else checks it.
 
     Cells are chosen by largest |analytic gradient| rather than hardcoded. The
-    robot's wheel contacts sit at x=+0.4/-0.5, y=±0.52, so the grid centre lies
-    *between* the wheels and carries no gradient at all — a fixed cell list
-    silently verifies nothing.
+    robot's wheel contacts sit off the grid centre (URDF: front wheels at
+    (0, ±0.36), rear at (−0.697, 0)), so the centre cell carries little or no
+    gradient — a fixed cell list silently verifies nothing.
     """
     n_steps = 250
     t_horizon = n_steps * DT
@@ -388,6 +432,205 @@ def test_gradient_matches_finite_differences(engine):
         checked += 1
 
     assert checked > 0, "no cell carried gradient — the test verified nothing"
+
+
+# ---------------------------------------------------------------------------
+# Contact model — the two engines must run the SAME one
+# ---------------------------------------------------------------------------
+
+
+def test_both_wrappers_default_to_the_production_contact_model():
+    """Neither wrapper may pick a contact model of its own.
+
+    models/simulator.py hard-coded `soft_contact_sigma=0.01` (softplus contact)
+    while models/simulator_wp.py never set it and so ran hard ReLU. Every
+    production checkpoint was trained with `--engine warp` (engine == "warp" in
+    every logs/*/args.json), i.e. under HARD contact — so hard is the default in
+    both, and softplus is an explicit opt-in. Pure config check, no GPU.
+    """
+    import inspect
+
+    from models.simulator import Simulator as TorchSim
+    from models.simulator_wp import Simulator as WarpSim
+
+    for sim_cls in (TorchSim, WarpSim):
+        sig = inspect.signature(sim_cls.__init__)
+        assert "soft_contact_sigma" in sig.parameters, (
+            f"{sim_cls.__module__}: the contact model is not selectable"
+        )
+        assert sig.parameters["soft_contact_sigma"].default is None, (
+            f"{sim_cls.__module__} defaults to a soft contact; production is hard"
+        )
+
+    sim = TorchSim(robot="helhest", batch_size=1, device="cpu")
+    assert sim.engine.config.soft_contact_sigma is None
+
+
+def test_both_wrappers_share_one_default_horizon():
+    """T_horizon was 1.0 in the torch wrapper and 5.0 in the warp one.
+
+    The trainer's single-segment path passes no horizon, so `--engine warp`
+    silently rolled out 5x further than `--engine torch` on the same config.
+    """
+    import inspect
+
+    from models.simulator import Simulator as TorchSim
+    from models.simulator_wp import Simulator as WarpSim
+
+    defaults = {
+        cls.__module__: inspect.signature(cls.__init__).parameters["T_horizon"].default
+        for cls in (TorchSim, WarpSim)
+    }
+    assert len(set(defaults.values())) == 1, f"T_horizon defaults differ: {defaults}"
+
+
+def test_wheel_geometry_has_one_source():
+    """Both wrappers read the URDF geometry from simulator.utils, not a copy."""
+    from models.simulator import Simulator as TorchSim
+    from models.simulator_wp import Simulator as WarpSim
+    from simulator.utils import robot_model_config
+
+    ref = robot_model_config("helhest")
+    assert torch.allclose(
+        ref.wheel_centers,
+        torch.tensor([[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]),
+    ), "the source of truth no longer matches the URDF tuple"
+    for cls in (TorchSim, WarpSim):
+        sim = cls(robot="helhest", batch_size=1, device="cpu")
+        assert torch.equal(sim.robot_model.wheel_centers, ref.wheel_centers)
+        assert torch.equal(sim.robot_model.wheel_radii, ref.wheel_radii)
+        assert torch.equal(sim.robot_model.cog, ref.cog)
+
+
+@requires_cuda
+def test_soft_contact_sigma_0p01_is_a_no_op():
+    """The 0.01 sigma the torch wrapper used to force changes NOTHING.
+
+    Measured (job 11564503, sections 4 and 5): torch soft vs torch hard is
+    bit-identical -- dpos 0.0 m, gradient cosine exactly 1.0 -- at every dt and
+    rollout length tried, on sloped terrain and on flat terrain seated exactly at
+    the contact boundary.
+
+    Why: sigma is a width in NEWTONS (softplus with beta = 1/sigma applied to the
+    force magnitude), while the force is divided by the contact count, so each
+    contributing point carries ~mg = 920 N at rest. beta*x is then ~9e4, far past
+    torch's softplus threshold of 20, where softplus IS the identity -- and ReLU
+    returns x too, because `in_contact` is a hard `dh < 0` step that already
+    zeroed everything with x <= 0. Smoothing a 920 N signal over a 0.01 N band
+    does nothing at either sign.
+
+    So the torch/warp "different contact models" divergence was real in the
+    configuration and inert in the numbers, and soft_contact_sigma does not
+    deliver the documented differentiable contact boundary at any production
+    setting. Both wrappers now default to hard contact regardless.
+    """
+    n_steps = 250
+    pos_soft, gs_soft, gf_soft = _rollout("torch", n_steps, soft_contact_sigma=0.01)
+    pos_hard, gs_hard, gf_hard = _rollout("torch", n_steps, soft_contact_sigma=None)
+
+    assert torch.equal(pos_soft, pos_hard), (
+        f"sigma 0.01 moved the pose by {(pos_soft - pos_hard).norm().item():.3e} m; "
+        "the no-op claim in this docstring no longer holds -- re-measure"
+    )
+    assert torch.equal(gs_soft, gs_hard) and torch.equal(gf_soft, gf_hard)
+
+
+@requires_cuda
+@pytest.mark.parametrize("engine", ["torch", "warp"])
+def test_soft_contact_sigma_reaches_both_engines(engine):
+    """Positive control for the test below: a big sigma must change the rollout.
+
+    Without this, the parity check at VISIBLE_SIGMA would pass vacuously if an
+    engine ignored the setting entirely -- which is exactly the failure mode
+    that let the two engines run different contact models unnoticed. Same
+    pattern as tests/test_slip_ref_velocity.py.
+    """
+    pos_soft, _, _ = _rollout(engine, 250, soft_contact_sigma=VISIBLE_SIGMA, flat=True)
+    pos_hard, _, _ = _rollout(engine, 250, soft_contact_sigma=None, flat=True)
+    moved = (pos_soft - pos_hard).norm().item()
+    assert moved > SAME_RUN_ATOL, (
+        f"{engine}: soft_contact_sigma={VISIBLE_SIGMA} moved the pose by only "
+        f"{moved:.3e} m -- the setting is not reaching the contact force"
+    )
+
+
+@requires_cuda
+def test_engines_agree_on_the_contact_model_where_it_is_visible():
+    """The contact-model mismatch detector.
+
+    Run both engines at a sigma the contact force actually responds to (proved
+    by the positive control above) and compare the GRADIENT, not just the pose.
+    If one engine ran softplus and the other ReLU, this is where it shows: at
+    the production sigma the two models are numerically identical, so comparing
+    forward positions there can never catch a mismatch.
+    """
+    _, gs_t, gf_t = _rollout("torch", 250, soft_contact_sigma=VISIBLE_SIGMA, flat=True)
+    _, gs_w, gf_w = _rollout("warp", 250, soft_contact_sigma=VISIBLE_SIGMA, flat=True)
+    for name, gw, gt in (("support", gs_w, gs_t), ("friction", gf_w, gf_t)):
+        assert torch.isfinite(gw).all(), f"warp {name} grad non-finite at soft contact"
+        cos, ratio = _cos(gw, gt), _ratio(gw, gt)
+        assert cos > GRAD_COS_MIN, (
+            f"soft contact, {name}: cosine={cos:.6f} -- the two engines are "
+            "running different contact models"
+        )
+        lo, hi = GRAD_RATIO_RANGE
+        assert lo < ratio < hi, f"soft contact, {name}: norm ratio={ratio:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# Non-finite gradients: the two engines fail differently
+# ---------------------------------------------------------------------------
+
+
+def _rollout_with_poisoned_cotangent(engine, n_steps=50):
+    """Backprop a loss whose cotangent contains an inf, and return d(support)."""
+    dt = DT
+    t_horizon = n_steps * dt
+    sim = _make_sim(engine, t_horizon, dt=dt)
+    support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon, dt=dt)
+    traj, _, _, _ = sim.predict_trajectory(
+        {"support": support, "friction": friction}, ctrl, ctrl_ts
+    )
+    w = torch.ones_like(traj[:, :, :3, 3])
+    w[0, n_steps // 2, 0] = float("inf")
+    (traj[:, :, :3, 3] * w).sum().backward()
+    return support.grad
+
+
+@requires_cuda
+def test_warp_zeroes_non_finite_gradients_but_says_so():
+    """The warp adjoint silently zeroed non-finite gradients; now it warns once.
+
+    The torch engine propagates them instead and lets utils/trainer.py's
+    `isfinite` check zero them one level up (utils/trainer.py:462-465), so the
+    two engines fail differently on the same input. Zeroing is kept -- the
+    trainer does the same thing -- but it is no longer silent, because a
+    NaN-producing rollout that quietly contributes a zero gradient is
+    indistinguishable from a converged one.
+    """
+    import simulator.engine_wp as ewp
+
+    ewp._WARNED_NONFINITE_GRAD = False
+    with pytest.warns(RuntimeWarning, match="non-finite gradient"):
+        g_warp = _rollout_with_poisoned_cotangent("warp")
+    assert torch.isfinite(g_warp).all(), "warp still returned a non-finite gradient"
+
+    # and the warning fires only once per process, so a training loop is not
+    # flooded by it
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _rollout_with_poisoned_cotangent("warp")
+    assert not [w for w in caught if "non-finite gradient" in str(w.message)]
+
+
+@requires_cuda
+def test_torch_propagates_non_finite_gradients():
+    """The other half of the asymmetry, pinned so it is a decision, not a bug."""
+    g_torch = _rollout_with_poisoned_cotangent("torch")
+    assert not torch.isfinite(g_torch).all(), (
+        "the torch engine now sanitises its gradients too -- update the "
+        "asymmetry documented in simulator/engine_wp.py and utils/trainer.py"
+    )
 
 
 # ---------------------------------------------------------------------------

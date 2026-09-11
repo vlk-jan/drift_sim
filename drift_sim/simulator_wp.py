@@ -8,10 +8,10 @@ from simulator.numerical import quat_to_rotmat
 from simulator.utils import (
     PhysicsEngineConfig,
     PhysicsState,
-    RobotModelConfig,
     WorldConfig,
     find_init_rob_position,
     raise_to_clearance,
+    robot_model_config,
 )
 
 
@@ -21,37 +21,20 @@ class Simulator(torch.nn.Module):
         robot="helhest",
         batch_size=1,
         device=None,
-        T_horizon=5.0,
+        T_horizon=1.0,
         dt=2e-3,
         clip_grad_norm=None,
+        soft_contact_sigma=None,
+        com_transfer=False,
     ):
+        """Warp wrapper. See models/simulator.py for T_horizon (was 5.0 here,
+        1.0 there, and the trainer's single-segment path passes neither) and for
+        soft_contact_sigma (None = the hard contact this wrapper has always run,
+        and the model every production checkpoint was trained under).
+        """
         super().__init__()
 
-        if robot == "helhest":
-            robot_model = RobotModelConfig(
-                mass=93.8,
-                cog=torch.tensor([-0.255, 0.009, 0.0]),  # URDF frame, see simulator.py
-                wheel_radii=torch.tensor([0.36, 0.36, 0.36]),
-                wheel_centers=torch.tensor(
-                    [[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]  # URDF, see simulator.py
-                ),
-                wheel_inertias=torch.tensor([0.2, 0.2, 0.2]),
-                inertia_tensor=torch.tensor(
-                    [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
-                ),
-            )
-        elif robot == "marv":
-            robot_model = RobotModelConfig(
-                mass=67.8,
-                wheel_radii=torch.tensor([0.12, 0.12, 0.12]),
-                wheel_centers=torch.tensor(
-                    [[0.245, 0.2025, 0.0], [0.245, -0.2025, 0.0], [-0.245, 0.0, 0.0]]
-                ),
-                wheel_inertias=torch.tensor([0.1, 0.1, 0.1]),
-                inertia_tensor=torch.diag(torch.tensor([15.0, 15.0, 30.0])),
-            )
-        else:
-            raise ValueError(f"Unsupported robot: {robot}")
+        robot_model = robot_model_config(robot)
 
         self.robot_model = robot_model
 
@@ -65,7 +48,12 @@ class Simulator(torch.nn.Module):
         self.engine = WarpStaticEngine(
             robot_model, batch_size, MAX_STEPS, device, clip_grad_norm=clip_grad_norm
         )
-        self.engine_config = PhysicsEngineConfig(num_robots=batch_size, dt=dt)
+        self.engine_config = PhysicsEngineConfig(
+            num_robots=batch_size,
+            dt=dt,
+            soft_contact_sigma=soft_contact_sigma,
+            com_transfer=com_transfer,
+        )
         self._geom = DPhysicsEngine(self.engine_config, robot_model).to(device)
         self.res = None
         self.max_coord = None

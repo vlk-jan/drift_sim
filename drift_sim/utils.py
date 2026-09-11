@@ -50,7 +50,20 @@ class WorldConfig(BaseConfig):
         instead compresses all terrain queries by (n-1)/n. See
         ``utils/misc.py::world_cfg_from_config``, which derives it from the
         perception config. May be a scalar or a per-axis (x, y) pair.
-    k_stiffness (float or torch.Tensor): stiffness of the terrain. Default is 40_000.
+    side_range / fwd_range (Tuple[float, float]): metric extent of the grid on
+        the two axes. The NAMES ARE HISTORICAL AND SWAPPED: ``side_range`` is
+        the range of the FIRST (x / forward) axis and ``fwd_range`` the range of
+        the SECOND (y / lateral) axis -- ``grid_center`` reads
+        ``center_x = mean(side_range)``, ``center_y = mean(fwd_range)``, and the
+        samplers pair them with ``max_coord[0]`` (x) and ``max_coord[1]`` (y).
+        ``utils/pcd.py::get_height_map`` uses the same swapped convention, so the
+        two agree; both are wrong about the words. Every extent in the repo is
+        square and centred on zero, so the mislabelling has no effect today --
+        it would bite the first caller that passes an asymmetric or non-square
+        extent. Pinned by ``tests/test_world_config.py``.
+    k_stiffness (float or torch.Tensor): stiffness of the terrain. Default is
+        400_000 N/m (the dataclass default below; the constant the training
+        stack passes is the same 4e5).
     k_friction (float or torch.Tensor): friction of the terrain. Default is 0.5.
     """
 
@@ -153,27 +166,6 @@ class WorldConfig(BaseConfig):
             (center_x, center_y), dtype=torch.float32, device=self.z_grid.device
         )
 
-    def ij_to_xyz(
-        self, ij: Union[torch.IntTensor, torch.LongTensor]
-    ) -> torch.FloatTensor:
-        """
-        ij is assumed to have the shape (N, B, 2) where N is the number of points and B
-            is the batch size.
-        """
-        N, B = ij.shape[:-1]
-
-        # Analytical calculation for x and y
-        # ij[..., 1] is x-index, ij[..., 0] is y-index (due to "xy" indexing convention
-        # in torch)
-        center = (self.grid_size - 1) / 2.0
-        x = (ij[..., 1] - center) * self.grid_res
-        y = (ij[..., 0] - center) * self.grid_res
-
-        batch_idx = torch.arange(B, device=ij.device).expand(N, B)
-        z = self.z_grid[batch_idx, ij[..., 0], ij[..., 1]]
-
-        return torch.stack((x, y, z), dim=-1)
-
 
 @dataclass
 class RobotModelConfig(BaseConfig):
@@ -181,8 +173,59 @@ class RobotModelConfig(BaseConfig):
     cog: torch.Tensor = torch.tensor([0, 0, 0])
     wheel_radii: torch.Tensor = torch.tensor([1, 1, 1])
     wheel_centers: torch.Tensor = torch.tensor(((1, -1, 0), (1, 1, 0), (-1, 0, 0)))
-    wheel_inertias: torch.Tensor = torch.tensor(())
     inertia_tensor: torch.Tensor = torch.eye(3)
+
+
+# ---------------------------------------------------------------------
+# Robot models -- THE single source of truth for wheel geometry
+# ---------------------------------------------------------------------
+# Everything that needs helhest's wheel positions/radii (both simulator
+# wrappers, the SimView renderer, the synthetic-control helpers, the label
+# scripts, the tests) must call robot_model_config() instead of restating
+# numbers. Seven copies of the pre-2026-09-04 layout survived the URDF fix and
+# put every wheel contact 0.2-0.4 m ahead of the wheels.
+def helhest_robot_model() -> "RobotModelConfig":
+    """HELHEST, from the robot URDF (/robot_description in every bag).
+
+    base_link IS the front axle: front wheels (0, +-0.36), rear (-0.697, 0),
+    radius 0.36. cog is 0.255 m behind the front axle. The earlier
+    (0.4, +-0.52) / (-0.5, 0) / 0.3685 had no source (found 2026-09-04).
+    """
+    return RobotModelConfig(
+        mass=93.8,
+        cog=torch.tensor([-0.255, 0.009, 0.0]),
+        wheel_radii=torch.tensor([0.36, 0.36, 0.36]),
+        wheel_centers=torch.tensor(
+            [[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]
+        ),
+        inertia_tensor=torch.tensor(
+            [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
+        ),
+    )
+
+
+def marv_robot_model() -> "RobotModelConfig":
+    return RobotModelConfig(
+        mass=67.8,
+        wheel_radii=torch.tensor([0.12, 0.12, 0.12]),
+        wheel_centers=torch.tensor(
+            [[0.245, 0.2025, 0.0], [0.245, -0.2025, 0.0], [-0.245, 0.0, 0.0]]
+        ),
+        inertia_tensor=torch.diag(torch.tensor([15.0, 15.0, 30.0])),
+    )
+
+
+ROBOT_MODELS = {"helhest": helhest_robot_model, "marv": marv_robot_model}
+
+
+def robot_model_config(robot: str = "helhest") -> "RobotModelConfig":
+    """Wheel geometry / mass / inertia of a supported robot."""
+    try:
+        return ROBOT_MODELS[robot]()
+    except KeyError:
+        raise ValueError(
+            f"Unsupported robot: {robot!r} (have {sorted(ROBOT_MODELS)})"
+        ) from None
 
 
 @dataclass
@@ -193,13 +236,32 @@ class PhysicsEngineConfig(BaseConfig):
         dt (float): time step for numerical integration. Default is 0.01. (100 Hz)
         gravity (float): acceleration due to gravity. Default is 9.81 m/s^2.
         torque_limit (float): torque limit that can be generated on CoG. The physics
-            engine clips it to this value. Default is 200.0 Nm.
-        damping_alpha (float): damping coefficient modifier, must be > 1.0.
-            Applies damping alpha times higher
-        than critical damping.
+            engine clips it to this value. Default is 5000.0 Nm.
+        damping_alpha (float): damping coefficient modifier, in units of critical
+            damping (alpha = 1.0, the default, IS critical damping; > 1 is
+            overdamped).
         ang_damping (float): angular damping coefficient. Default is 0.1.
-        soft_contact_sigma (float): soft contact sigma. Default is 0.5. This is the
-            width of the soft contact force function.
+        soft_contact_sigma (float or None): width, IN NEWTONS, of the softplus
+            that replaces the ReLU in the contact-force magnitude (beta =
+            1/sigma, applied to the force). Default None = HARD contact (ReLU),
+            which is what every production checkpoint was trained under
+            (`--engine warp` in every logs/*/args.json).
+
+            Two things it does NOT do, both measured (job 11564503):
+            - It does not soften the contact BOUNDARY. `in_contact` is a hard
+              `dh < 0` step in the torch engine and an early `return` in the warp
+              kernel, so a point crossing the surface still switches on
+              discontinuously whatever sigma is.
+            - At 0.01 it does not soften anything at all. The spring force is
+              divided by the contact count, so each contributing point carries
+              ~mg = 920 N at rest; beta*x is then ~9e4, where softplus is the
+              identity to machine precision. Torch soft vs torch hard came out
+              BIT-IDENTICAL at every dt and rollout length tried. Sigma would
+              have to be O(1000 N) to change the dynamics, and above ~1300 the
+              robot cannot rest at all (softplus(0) = sigma*log 2 > mg).
+        com_transfer (bool): integrate the acceleration onto the body ORIGIN
+            rather than treating the origin as the CoM. Default False = the
+            historical behaviour. See the field comment below.
         slip_ref_velocity (float): slip speed (m/s) at which the tangential force
             reaches ~76% of its Coulomb limit, via tanh(|v_t| / slip_ref).
             Default 1.0, which is the historical behaviour (a bare tanh(|v_t|)
@@ -223,8 +285,15 @@ class PhysicsEngineConfig(BaseConfig):
     torque_limit: float = 5000.0
     damping_alpha: float = 1.0
     ang_damping: float = 0.1
-    soft_contact_sigma: Optional[float] = None  # None or 0.01
+    soft_contact_sigma: Optional[float] = None  # None = hard ReLU (production)
     slip_ref_velocity: float = 1.0
+    # state.x is the body ORIGIN (base_link = the front axle), not the CoM. With
+    # this off (the historical behaviour every checkpoint was trained under) the
+    # engine integrates the CoM acceleration onto the origin, dropping the
+    # alpha x r and omega x (omega x r) transfer terms, r = R @ cog (|r| =
+    # 0.255 m on helhest). Turning it on changes the dynamics: trajectory
+    # metrics are NOT comparable across values.
+    com_transfer: bool = False
 
 
 # ---------------------------------------------------------------------
@@ -475,13 +544,19 @@ def generate_controls(
     num_robots,
     device,
     seed=42,
-    wheel_radius=0.3685,
+    wheel_radius=None,
     current_vel_linear=1.0,
     clamp=None,
 ):
     """
     Generates random-walk angular wheel velocities.
+
+    wheel_radius defaults to the helhest URDF radius from robot_model_config;
+    it converts the requested linear speed into rad/s, which is what the engine
+    consumes.
     """
+    if wheel_radius is None:
+        wheel_radius = float(robot_model_config("helhest").wheel_radii[0])
     torch.manual_seed(seed)
     steps = int(duration / dt)
     controls = []
@@ -527,8 +602,8 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
     controls = []
     timestamps = []
 
-    # Parameters for Helhest
-    wheel_radius = 0.3685
+    # Parameters for Helhest (radius from the one source of truth, not a copy)
+    wheel_radius = float(robot_model_config("helhest").wheel_radii[0])
     max_speed_lin = 5.0  # m/s
     max_omega = max_speed_lin / wheel_radius
 
@@ -644,34 +719,35 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
     ).expand(num_robots, -1)
 
 
+WHEEL_VISUAL_WIDTH = 0.142  # tyre width, visual only -- no dynamics reads it
+
+
 def add_helhest_visual_wheels(scene, parent: str = "box") -> None:
-    """
-    Adds rigidly attached visual wheels for the Helhest robot to the SimView scene.
+    """Rigidly attached visual wheels for the Helhest robot in a SimView scene.
+
+    Geometry comes from robot_model_config("helhest"), NOT from a local copy:
+    this renderer carried the pre-URDF (0.4, +-0.52) / (-0.5, 0) / 0.3685 layout
+    until 2026-09-10, so every published scene drew the wheels up to 0.4 m away
+    from the contacts the simulator was actually using.
     """
     from simview import BodyShapeType, SimViewBody
 
-    wheels_config = {
-        "left_wheel": {
-            "pos": [0.4, 0.52, 0.0],
-            "rot": [0.7071068, -0.7071068, 0.0, 0.0],
-        },
-        "right_wheel": {
-            "pos": [0.4, -0.52, 0.0],
-            "rot": [0.7071068, 0.7071068, 0.0, 0.0],
-        },
-        "rear_wheel": {
-            "pos": [-0.5, 0.0, 0.0],
-            "rot": [0.7071068, -0.7071068, 0.0, 0.0],
-        },
-    }
-    for name, config in wheels_config.items():
+    model = robot_model_config("helhest")
+    centers = model.wheel_centers.tolist()
+    radii = model.wheel_radii.tolist()
+    # rows are ordered [+y (left), -y (right), rear]; the quaternion lays the
+    # cylinder axis along y, sign following which side the wheel is on
+    names = ("left_wheel", "right_wheel", "rear_wheel")
+    for name, pos, radius in zip(names, centers, radii):
+        sign = 1.0 if pos[1] < 0 else -1.0
+        rot = [0.7071068, sign * 0.7071068, 0.0, 0.0]
         scene.add_body_object(
             SimViewBody.create(
                 name=name,
                 body_type=BodyShapeType.CYLINDER,
-                radius=0.3685,
-                height=0.142,
+                radius=float(radius),
+                height=WHEEL_VISUAL_WIDTH,
                 parent=parent,
-                local_transform=config["pos"] + config["rot"],
+                local_transform=list(pos) + rot,
             )
         )

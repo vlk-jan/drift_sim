@@ -7,10 +7,10 @@ from simulator.numerical import quat_to_rotmat
 from simulator.utils import (
     PhysicsEngineConfig,
     PhysicsState,
-    RobotModelConfig,
     WorldConfig,
     find_init_rob_position,
     raise_to_clearance,
+    robot_model_config,
 )
 
 
@@ -22,46 +22,31 @@ class Simulator(torch.nn.Module):
         device=None,
         T_horizon=1.0,
         dt=2e-3,  # see PhysicsEngineConfig.dt / scripts/analysis/sweep_dt.py
+        soft_contact_sigma=None,
+        com_transfer=False,
     ):
+        """T_horizon defaults to 1.0 in BOTH wrappers (and in the kinematic one),
+        matching train.py's --t_horizon default. It used to be 5.0 here in the
+        warp wrapper only, so the trainer's single-segment path (which passes no
+        horizon) rolled out 5x further on `--engine warp` than on `--engine
+        torch`.
+
+        soft_contact_sigma defaults to None = HARD contact (ReLU), the model
+        every production checkpoint was trained under (`--engine warp` in every
+        logs/*/args.json, and the warp wrapper never set a sigma). This wrapper
+        used to hard-code 0.01, which made the two engines run different physics
+        while the parity test compared only forward positions.
+        """
         super().__init__()
 
-        if robot == "helhest":
-            robot_model = RobotModelConfig(
-                mass=93.8,
-                # cog was given relative to the OLD wheel layout (front axle at
-                # x=0.4); in the URDF frame (front axle at x=0) it is 0.255 m behind
-                # the front axle -- the kinematic engine already carried -0.255.
-                cog=torch.tensor([-0.255, 0.009, 0.0]),
-                wheel_radii=torch.tensor([0.36, 0.36, 0.36]),
-                # base_link IS the front axle (robot URDF, /robot_description in
-                # every bag): front wheels (0, +-0.36), rear (-0.697, 0), r 0.36.
-                # The earlier (0.4, +-0.52) / (-0.5, 0) / 0.3685 had no source and put
-                # every wheel contact 0.2-0.4 m ahead of the wheels (found 2026-09-04).
-                wheel_centers=torch.tensor(
-                    [[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]
-                ),
-                wheel_inertias=torch.tensor([0.2, 0.2, 0.2]),
-                inertia_tensor=torch.tensor(
-                    [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
-                ),
-            )
-        elif robot == "marv":
-            robot_model = RobotModelConfig(
-                mass=67.8,
-                wheel_radii=torch.tensor([0.12, 0.12, 0.12]),
-                wheel_centers=torch.tensor(
-                    [[0.245, 0.2025, 0.0], [0.245, -0.2025, 0.0], [-0.245, 0.0, 0.0]]
-                ),
-                wheel_inertias=torch.tensor([0.1, 0.1, 0.1]),
-                inertia_tensor=torch.diag(torch.tensor([15.0, 15.0, 30.0])),
-            )
-        else:
-            raise ValueError(f"Unsupported robot: {robot}")
-
+        robot_model = robot_model_config(robot)
         self.robot_model = robot_model
 
         engine_config = PhysicsEngineConfig(
-            num_robots=batch_size, dt=dt, soft_contact_sigma=0.01
+            num_robots=batch_size,
+            dt=dt,
+            soft_contact_sigma=soft_contact_sigma,
+            com_transfer=com_transfer,
         )
         self.res = None
         self.max_coord = None

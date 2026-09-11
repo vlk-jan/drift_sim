@@ -10,8 +10,6 @@ __all__ = [
     "unit_quaternion",
     "integrate_quaternion",
     "interpolate_grid",
-    "interpolate_surface_normals_multi",
-    "interpolate_surface_normals",
 ]
 
 
@@ -103,75 +101,3 @@ def interpolate_grid(grid, xy, max_coord):
     sampled = F.grid_sample(grid, xy_norm, mode="bilinear", align_corners=True)
 
     return sampled.permute(0, 2, 3, 1)
-
-
-def interpolate_surface_normals_multi(grid_normals, query, max_coord):
-    """
-    Compute surface normals for multiple wheels and multiple points.
-
-    Args:
-        grid_normals: (B, 3, H, W) pre-computed normals
-        query:        (B, W, P, 2) world XY positions of wheel contact samples
-        max_coord:    normalization coordinate
-
-    Returns:
-        normals: (B, W, P, 3)
-    """
-    assert query.shape[3] == 2  # plane
-    B, W, P, _ = query.shape
-
-    # --- Shape check ---
-    assert grid_normals.shape[0] == query.shape[0], (
-        f"Batch mismatch: grid_normals batch={grid_normals.shape[0]} query batch={query.shape[0]}"
-    )
-
-    # --- Flatten wheels & points, keep batch ---
-    # (B, W*P, 2)
-    query_flat = query.flatten(1, 2)
-
-    # --- Compute normals using existing single-sample function ---
-    # Output: (B, W*P, 3)
-    normals_flat = interpolate_surface_normals(
-        grid_normals,
-        query_flat,
-        max_coord,
-    )
-
-    # --- Restore wheel/point structure ---
-    return normals_flat.reshape(B, W, P, 3)
-
-
-def interpolate_surface_normals(
-    grid_normals: torch.Tensor, query: torch.Tensor, max_coord: float
-) -> torch.Tensor:
-    """
-    Computes the surface normals at the queried coordinates.
-
-    Parameters:
-    - grid_normals: torch.Tensor of normals (B, 3, H, W).
-    - query: Tensor of desired point coordinates for interpolation (3D array), (B, N,
-        2).
-
-    Returns:
-    - Surface normals at the queried coordinates (B, N, 3).
-    """
-    assert grid_normals.shape[0] == query.shape[0], (
-        f"Batch mismatch: grid_normals batch={grid_normals.shape[0]} query batch={query.shape[0]}"
-    )
-    # Normalize to [-1, 1], clamp the query coordinates to the grid's valid range
-    norm_query = torch.clamp(query / max_coord, -1, 1)
-
-    # Query coordinates of shape (B, N, 1, 2)
-    grid_coords = norm_query.unsqueeze(2)
-
-    # Interpolate the normals: (B, 3, H, W) -> (B, 3, N, 1)
-    interpolated = torch.nn.functional.grid_sample(
-        grid_normals, grid_coords, align_corners=True, mode="bilinear"
-    )
-
-    # Reshape to (B, N, 3)
-    # interpolated is (B, 3, N, 1) -> squeeze(-1) -> (B, 3, N) -> transpose -> (B, N, 3)
-    normals = interpolated.squeeze(-1).transpose(1, 2)
-
-    # Normalize (because interpolation doesn't preserve unit length)
-    return F.normalize(normals, dim=-1, eps=1e-6)
