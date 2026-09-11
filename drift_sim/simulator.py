@@ -22,32 +22,20 @@ class Simulator(torch.nn.Module):
         device=None,
         T_horizon=1.0,
         dt=2e-3,  # see PhysicsEngineConfig.dt / scripts/analysis/sweep_dt.py
-        soft_contact_sigma=None,
         com_transfer=False,
     ):
-        """T_horizon defaults to 1.0 in BOTH wrappers (and in the kinematic one),
-        matching train.py's --t_horizon default. It used to be 5.0 here in the
+        """T_horizon defaults to 1.0 in BOTH wrappers, matching train.py's
+        --t_horizon default. It used to be 5.0 here in the
         warp wrapper only, so the trainer's single-segment path (which passes no
         horizon) rolled out 5x further on `--engine warp` than on `--engine
         torch`.
-
-        soft_contact_sigma defaults to None = HARD contact (ReLU), the model
-        every production checkpoint was trained under (`--engine warp` in every
-        logs/*/args.json, and the warp wrapper never set a sigma). This wrapper
-        used to hard-code 0.01, which made the two engines run different physics
-        while the parity test compared only forward positions.
         """
         super().__init__()
 
         robot_model = robot_model_config(robot)
         self.robot_model = robot_model
 
-        engine_config = PhysicsEngineConfig(
-            num_robots=batch_size,
-            dt=dt,
-            soft_contact_sigma=soft_contact_sigma,
-            com_transfer=com_transfer,
-        )
+        engine_config = PhysicsEngineConfig(dt=dt, com_transfer=com_transfer)
         self.res = None
         self.max_coord = None
         self.side_range = None

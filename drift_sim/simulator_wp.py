@@ -23,14 +23,10 @@ class Simulator(torch.nn.Module):
         device=None,
         T_horizon=1.0,
         dt=2e-3,
-        clip_grad_norm=None,
-        soft_contact_sigma=None,
         com_transfer=False,
     ):
         """Warp wrapper. See models/simulator.py for T_horizon (was 5.0 here,
-        1.0 there, and the trainer's single-segment path passes neither) and for
-        soft_contact_sigma (None = the hard contact this wrapper has always run,
-        and the model every production checkpoint was trained under).
+        1.0 there, and the trainer's single-segment path passes neither).
         """
         super().__init__()
 
@@ -45,15 +41,8 @@ class Simulator(torch.nn.Module):
         self.device = device
 
         MAX_STEPS = 100_000
-        self.engine = WarpStaticEngine(
-            robot_model, batch_size, MAX_STEPS, device, clip_grad_norm=clip_grad_norm
-        )
-        self.engine_config = PhysicsEngineConfig(
-            num_robots=batch_size,
-            dt=dt,
-            soft_contact_sigma=soft_contact_sigma,
-            com_transfer=com_transfer,
-        )
+        self.engine = WarpStaticEngine(robot_model, batch_size, MAX_STEPS, device)
+        self.engine_config = PhysicsEngineConfig(dt=dt, com_transfer=com_transfer)
         self._geom = DPhysicsEngine(self.engine_config, robot_model).to(device)
         self.res = None
         self.max_coord = None

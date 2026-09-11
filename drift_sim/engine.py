@@ -133,11 +133,7 @@ class DPhysicsEngine(torch.nn.Module):
         Calculate the spring force acting on the robot points.
 
         `in_contact` is a HARD (dh < 0) step, so the contact BOUNDARY is not
-        differentiable whatever soft_contact_sigma is. And sigma is a width in
-        NEWTONS: with the force divided by the contact count each contributing
-        point carries ~mg = 920 N, so the production-adjacent 0.01 leaves the
-        rollout bit-identical to hard ReLU (measured, job 11564503). See
-        PhysicsEngineConfig.soft_contact_sigma.
+        differentiable.
         """
         k = stiffness.unsqueeze(-1)  # shape (B, W, 1, 1)
         b = self.config.damping_alpha * 2 * (self._mass * k) ** 0.5
@@ -149,14 +145,7 @@ class DPhysicsEngine(torch.nn.Module):
         # add unilateral constraint - to ensure the ground can only push, never pull.
         force_magnitude = -(k * dh_points + b * xd_points_n)
 
-        if self.config.soft_contact_sigma is not None:
-            # Soft contact: Smooth approximation of ReLU using Softplus
-            F_spring_mag = torch.nn.functional.softplus(
-                force_magnitude, beta=1.0 / self.config.soft_contact_sigma
-            )
-        else:
-            # Hard contact: ReLU
-            F_spring_mag = torch.relu(force_magnitude)
+        F_spring_mag = torch.relu(force_magnitude)
 
         F_spring = F_spring_mag * normals
 

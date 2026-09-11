@@ -17,14 +17,13 @@ def _flat_props(mu, k=4e5):
     }
 
 
-def _make_sim(t_horizon, dt=0.002, soft_contact_sigma=None, com_transfer=False):
+def _make_sim(t_horizon, dt=0.002, com_transfer=False):
     sim = Simulator(
         robot="helhest",
         batch_size=1,
         device="cpu",
         T_horizon=t_horizon,
         dt=dt,
-        soft_contact_sigma=soft_contact_sigma,
         com_transfer=com_transfer,
     )
     sim.update_world_config(
@@ -160,27 +159,6 @@ def test_impulse_limit_is_inert_at_the_training_dt():
         "the impulse cap never binds even at dt 5e-2 -- it is dead code and the "
         "measurement in this docstring is stale"
     )
-
-
-def test_contact_mask_is_hard_even_with_soft_contact_sigma():
-    """soft_contact_sigma smooths the force MAGNITUDE, not the contact boundary.
-
-    The docs claimed a differentiable contact boundary. `in_contact` is a
-    `dh < 0` step in the torch engine and an early `return` in the warp kernel,
-    so a point crossing the surface still switches its force on discontinuously
-    whatever sigma is set to. Pinned so the docstring and the code agree.
-    """
-    sim = _make_sim(0.1, dt=0.002, soft_contact_sigma=0.01)
-    engine = sim.engine
-    dh = torch.tensor([[[[-1e-9], [1e-9]]]])  # one just inside, one just outside
-    normals = torch.tensor([[[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]]])
-    v = torch.zeros(1, 1, 2, 3)
-    stiff = torch.full((1, 1, 2), 4e5)
-    in_c = (dh < 0).float()
-    n_c = in_c.sum(dim=(1, 2), keepdim=True).clamp_min(1)
-    F = engine._calculate_spring_force(dh, v, normals, stiff, in_c, n_c)
-    assert F[0, 0, 1].norm().item() == 0.0, "a point above the surface got a force"
-    assert F[0, 0, 0].norm().item() > 0.0, "a point below the surface got none"
 
 
 def test_com_transfer_defaults_off_and_is_live_when_enabled():

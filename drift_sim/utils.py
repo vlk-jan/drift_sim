@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Tuple, Union
 
 import torch
 from tensordict import TensorClass
@@ -16,17 +16,6 @@ from simulator.numerical import (
 # ---------------------------------------------------------------------
 class BaseConfig:
     """Base class holding a chunk of the simulation configuration."""
-
-    def to(self, device: Union[torch.device, str]):
-        """
-        Moves all tensors to the specified device.
-
-        Args:
-            device (torch.device or str): device to move the tensors to.
-        """
-        for attr, val in self.__dict__.items():
-            if isinstance(val, torch.Tensor):
-                setattr(self, attr, val.to(device))
 
 
 @dataclass
@@ -169,11 +158,18 @@ class WorldConfig(BaseConfig):
 
 @dataclass
 class RobotModelConfig(BaseConfig):
-    mass: float = 0
-    cog: torch.Tensor = torch.tensor([0, 0, 0])
-    wheel_radii: torch.Tensor = torch.tensor([1, 1, 1])
-    wheel_centers: torch.Tensor = torch.tensor(((1, -1, 0), (1, 1, 0), (-1, 0, 0)))
-    inertia_tensor: torch.Tensor = torch.eye(3)
+    """Mass properties and wheel geometry of one robot.
+
+    Every field is required: there is no such thing as a default robot, and the
+    placeholder wheel layout these fields used to default to was a fourth copy
+    of geometry that only robot_model_config() is allowed to state.
+    """
+
+    mass: float
+    cog: torch.Tensor
+    wheel_radii: torch.Tensor
+    wheel_centers: torch.Tensor
+    inertia_tensor: torch.Tensor
 
 
 # ---------------------------------------------------------------------
@@ -233,32 +229,14 @@ class PhysicsEngineConfig(BaseConfig):
     """Physical constants of the simulation: gravity, time step, limits.
 
     Attributes:
-        dt (float): time step for numerical integration. Default is 0.01. (100 Hz)
-        gravity (float): acceleration due to gravity. Default is 9.81 m/s^2.
+        dt (float): time step for numerical integration. Default is 2e-3 (500 Hz).
+        g (float): acceleration due to gravity. Default is 9.81 m/s^2.
         torque_limit (float): torque limit that can be generated on CoG. The physics
             engine clips it to this value. Default is 5000.0 Nm.
         damping_alpha (float): damping coefficient modifier, in units of critical
             damping (alpha = 1.0, the default, IS critical damping; > 1 is
             overdamped).
         ang_damping (float): angular damping coefficient. Default is 0.1.
-        soft_contact_sigma (float or None): width, IN NEWTONS, of the softplus
-            that replaces the ReLU in the contact-force magnitude (beta =
-            1/sigma, applied to the force). Default None = HARD contact (ReLU),
-            which is what every production checkpoint was trained under
-            (`--engine warp` in every logs/*/args.json).
-
-            Two things it does NOT do, both measured (job 11564503):
-            - It does not soften the contact BOUNDARY. `in_contact` is a hard
-              `dh < 0` step in the torch engine and an early `return` in the warp
-              kernel, so a point crossing the surface still switches on
-              discontinuously whatever sigma is.
-            - At 0.01 it does not soften anything at all. The spring force is
-              divided by the contact count, so each contributing point carries
-              ~mg = 920 N at rest; beta*x is then ~9e4, where softplus is the
-              identity to machine precision. Torch soft vs torch hard came out
-              BIT-IDENTICAL at every dt and rollout length tried. Sigma would
-              have to be O(1000 N) to change the dynamics, and above ~1300 the
-              robot cannot rest at all (softplus(0) = sigma*log 2 > mg).
         com_transfer (bool): integrate the acceleration onto the body ORIGIN
             rather than treating the origin as the CoM. Default False = the
             historical behaviour. See the field comment below.
@@ -275,7 +253,6 @@ class PhysicsEngineConfig(BaseConfig):
             dynamics, so leave it at 1.0 unless you mean to.
     """
 
-    num_robots: int = 1
     # 2e-3 chosen by scripts/analysis/sweep_dt.py on real helhest terrain (see the
     # dt section in CLAUDE.md): it halves the step count versus the old 1e-3 while
     # GT trajectory error, final error and gradient norm are all indistinguishable.
@@ -285,7 +262,6 @@ class PhysicsEngineConfig(BaseConfig):
     torque_limit: float = 5000.0
     damping_alpha: float = 1.0
     ang_damping: float = 0.1
-    soft_contact_sigma: Optional[float] = None  # None = hard ReLU (production)
     slip_ref_velocity: float = 1.0
     # state.x is the body ORIGIN (base_link = the front axle), not the CoM. With
     # this off (the historical behaviour every checkpoint was trained under) the

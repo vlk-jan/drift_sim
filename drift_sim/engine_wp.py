@@ -4,17 +4,9 @@ Same physics, ~10x cheaper per rollout. The two engines are kept formula-for-for
 identical on purpose — tests/test_engine_parity.py checks forward poses *and*
 gradients between them, and any deliberate divergence here shows up there.
 
-That claim was false until 2026-09-10 for the contact model: the torch WRAPPER
-(models/simulator.py) hard-coded soft_contact_sigma=0.01 while the warp wrapper
-left it unset, so torch ran softplus contact and warp ran hard ReLU. The forwards
-agree to 2e-3 m, so the parity test could not see it. Both wrappers now default to
-the HARD contact every `--engine warp` production checkpoint was trained under.
-Measured afterwards (job 11564503): at sigma 0.01 the two contact models are
-bit-identical anyway -- sigma is a width in NEWTONS and each contributing contact
-point carries ~mg = 920 N, so the softplus is the identity there. The divergence
-was real in the configuration and inert in the numbers. The guard is
-tests/test_engine_parity.py::test_engines_agree_on_the_contact_model_where_it_is_visible,
-which compares the engines at a sigma the force actually responds to.
+Both engines use hard ReLU contact: the contact force magnitude is
+`max(-k*dh - b*vn, 0)`, with no softening of the force magnitude or the contact
+boundary.
 
 Structure, and why it matters
 -----------------------------
@@ -143,18 +135,6 @@ def get_wheel_point_local(i: int, total_points: int, radius: float):
 
 
 @wp.func
-def softplus_stable(x: float, sigma: float):
-    """Soft contact force. sigma <= 0 falls back to hard contact (ReLU)."""
-    if sigma <= 0.0:
-        return wp.max(x, 0.0)
-    beta = 1.0 / sigma
-    xb = x * beta
-    if xb > 20.0:  # exp() would overflow; softplus is the identity out here
-        return x
-    return wp.log(1.0 + wp.exp(xb)) / beta
-
-
-@wp.func
 def sinc_stable(theta: float):
     """sin(theta)/theta, finite and differentiable at theta = 0.
 
@@ -242,7 +222,6 @@ def accumulate_forces_kernel(
     max_coord: wp.vec2,
     dt: float,
     damping_alpha: float,
-    soft_contact_sigma: float,
     slip_ref_velocity: float,
     contact_counts: wp.array2d(dtype=float),
     force_acc: wp.array2d(dtype=wp.vec3),
@@ -289,7 +268,7 @@ def accumulate_forces_kernel(
     vn = wp.dot(v_total, n_surf)
 
     b_damp = damping_alpha * 2.0 * wp.sqrt(mass) * wp.sqrt(k_s)
-    f_mag = softplus_stable(-k_s * dist - b_damp * vn, soft_contact_sigma) / count
+    f_mag = wp.max(-k_s * dist - b_damp * vn, 0.0) / count
     F_spring = n_surf * f_mag
 
     # Friction is tangential: strip the normal component of the contact velocity
@@ -422,13 +401,11 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         num_steps,
         g,
         damping_alpha,
-        soft_contact_sigma,
         slip_ref_velocity,
         ang_damping,
         torque_limit,
         com_transfer,
         device_str,
-        clip_grad_norm,
     ):
         device = wp.get_device(device_str)
         B = init_x.shape[0]
@@ -523,7 +500,6 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                         mc_wp,
                         dt,
                         damping_alpha,
-                        soft_contact_sigma,
                         slip_ref_velocity,
                         counts,
                     ],
@@ -556,7 +532,6 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
         ctx.wp_inputs = {"ctrl": wp_ctrl, "z": wp_z, "n": wp_n, "kf": wp_kf}
         ctx.state = (state_x, state_q, state_xd, state_omega)
-        ctx.clip_grad_norm = clip_grad_norm
 
         # Drop the seeded step 0 so the outputs line up with the torch engine,
         # whose first returned pose is the state *after* one step.
@@ -606,12 +581,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
-            if ctx.clip_grad_norm is not None:
-                norm = g.norm()
-                if norm > ctx.clip_grad_norm:
-                    g = g * (ctx.clip_grad_norm / norm)
-            return g
+            return torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
 
         return (
             None,  # init_x   — seeded by a detached plane fit, see models/simulator_wp.py
@@ -635,13 +605,11 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             None,  # num_steps
             None,  # g
             None,  # damping_alpha
-            None,  # soft_contact_sigma
             None,  # slip_ref_velocity
             None,  # ang_damping
             None,  # torque_limit
             None,  # com_transfer
             None,  # device_str
-            None,  # clip_grad_norm
         )
 
 
@@ -654,12 +622,10 @@ class WarpStaticEngine:
         batch_size,
         max_steps,
         device="cuda",
-        clip_grad_norm=None,
     ):
         self.device = wp.get_device(device)
         self.batch_size = batch_size
         self.max_steps = max_steps
-        self.clip_grad_norm = clip_grad_norm
 
         r = robot_model_config
         self.mass = float(r.mass)
@@ -708,13 +674,9 @@ class WarpStaticEngine:
             num_steps,
             engine_config.g,
             engine_config.damping_alpha,
-            engine_config.soft_contact_sigma
-            if engine_config.soft_contact_sigma is not None
-            else 0.0,
-            float(getattr(engine_config, "slip_ref_velocity", 1.0) or 1.0),
+            float(engine_config.slip_ref_velocity),
             engine_config.ang_damping,
             engine_config.torque_limit,
-            1.0 if getattr(engine_config, "com_transfer", False) else 0.0,
+            1.0 if engine_config.com_transfer else 0.0,
             str(self.device),
-            self.clip_grad_norm,
         )
