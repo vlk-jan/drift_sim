@@ -5,7 +5,7 @@ from _helpers import make_sim as _make_sim_factory
 
 GRID_N = 64
 RES = 0.1
-MAX_COORD = GRID_N * RES / 2  # ±3.2 m
+MAX_COORD = GRID_N * RES / 2  # +-3.2 m
 
 
 def _flat_props(mu, k=4e5):
@@ -60,20 +60,13 @@ def test_friction_monotonic_travel():
 def test_impulse_limit_is_inert_at_the_training_dt():
     """The friction impulse cap must not bind at dt 2e-3, and must be reachable.
 
-    `F_fric <= m*|v_t| / N / dt` used to divide by a hard 3 (the wheel count)
-    while F_N per contact point is ~mg/48, so it was never the per-point limit it
-    claims to be. Measured on the cluster (job 11564506,
-    slurm/out/audit_sim_engine_terms_11564506.out), headroom F_imp_lim / F_c_raw
-    over a 0.5 s rollout on sloped terrain:
+    Cap `F_fric <= m*|v_t| / N / dt`; measured headroom F_imp_lim / F_c_raw over
+    a 0.5 s sloped rollout:
 
         dt 2e-3   min 18.4x   median 79x    0 points binding
         dt 5e-3   min  6.5x   median 29x    0 points binding
         dt 1e-2   min  1.4x   median 2.3x   0 points binding
         dt 2e-2   min 0.64x   median 0.83x  4 points binding
-
-    So it is inert where training runs and dt-dependent above it. This test pins
-    both halves cheaply: at dt 2e-3 the cap never binds, and it is not dead code
-    (a 25x larger dt makes it bind).
     """
     from simulator.utils import PhysicsState, WorldConfig
     from utils.geometry import quat_to_rotmat
@@ -148,16 +141,11 @@ def test_impulse_limit_is_inert_at_the_training_dt():
 
 
 def test_com_transfer_defaults_off_and_is_live_when_enabled():
-    """xdd is integrated onto the BODY ORIGIN, not the CoM.
+    """com_transfer must default off and change the rollout when enabled.
 
-    The alpha x r + omega x (omega x r) transfer (r = R @ cog, |r| = 0.2552 m on
-    helhest) is dropped. Measured (job 11564506): the dropped acceleration peaks
-    at 17.6 m/s^2 and averages 1.2-2.7 m/s^2, but it is oscillatory, so the
-    integrated pose difference is only 3.8e-4 m at 0.25 s, 5.9e-3 m at 1 s and
-    5.8e-3 m at the production 2 s horizon.
-
-    Every production checkpoint was trained without it, so the flag is OFF by
-    default; this pins that, and that turning it on is not a no-op.
+    Without it xdd lands on the body origin, not the CoM; the dropped term is
+    oscillatory (~5.8e-3 m pose error at 2 s) and production checkpoints were
+    trained without it. Catches the flag not reaching the engine.
     """
     props = _flat_props(mu=0.6)
     ramp = torch.linspace(-1.0, 1.0, GRID_N)

@@ -1,38 +1,18 @@
 """Warp port of the spring-contact engine in simulator/engine.py.
 
-Same physics, ~10x cheaper per rollout. The two engines are kept formula-for-formula
-identical on purpose — tests/test_engine_parity.py checks forward poses *and*
-gradients between them, and any deliberate divergence here shows up there.
+Same physics (hard ReLU contact, `max(-k*dh - b*vn, 0)`), ~10x cheaper per
+rollout. Keep the engines formula-for-formula identical: tests/test_engine_parity.py
+checks forward poses and gradients between them.
 
-Both engines use hard ReLU contact: the contact force magnitude is
-`max(-k*dh - b*vn, 0)`, with no softening of the force magnitude or the contact
-boundary.
-
-Structure, and why it matters
------------------------------
-The rollout is driven by **one kernel launch per timestep, recorded on a wp.Tape**,
-with the robot state living in step-indexed arrays (`state_x[step]`, ...) rather
-than in kernel-local variables.
-
-This is not a style choice. Warp only unrolls loops whose `range()` arguments are
-compile-time constants (`warp.config.max_unroll`, default 16). A loop it cannot
-unroll becomes a *dynamic* loop, and for a dynamic loop that mutates variables read
-in later iterations Warp falls back to `materialize_redefinitions`, which — in its
-own words — "violates SSA": the reverse pass then uses each variable's end-of-loop
-value in place of its per-iteration value. An earlier version of this file ran the
-entire 1000-step rollout inside a single kernel that way. Its forward matched the
-torch engine to 3.3e-4 m while its gradients were cosine -0.01 against torch at 100
-steps and NaN by 250 — silently, because nothing compared them.
-
-Keeping each step in its own launch means every launch's primal inputs are still
-resident in the state arrays when the tape replays the adjoint, so the reverse pass
-is exact. The per-point loops are gone entirely: contact points are threads
-(`dim=(B, NUM_WHEELS, NUM_WHEEL_POINTS)`), which removes the second dynamic loop and
-also fixes occupancy — the old kernel launched with `dim=B`, so at the batch size
-used for online adaptation (B=1) the whole rollout ran on a single CUDA thread.
-
-`tests/test_engine_parity.py::test_warp_kernels_have_no_dynamic_loops` statically
-forbids reintroducing either loop.
+The rollout is one kernel launch per timestep on a wp.Tape, with state in
+step-indexed arrays (`state_x[step]`, ...), and contact points are threads
+(`dim=(B, NUM_WHEELS, NUM_WHEEL_POINTS)`). Warp only unrolls loops with
+compile-time `range()` bounds; a dynamic loop that mutates state falls back to
+`materialize_redefinitions`, whose adjoint uses end-of-loop values and silently
+gives wrong gradients (forward still matches). Per-step launches keep every
+primal input resident for an exact reverse pass.
+`test_engine_parity.py::test_warp_kernels_have_no_dynamic_loops` forbids
+reintroducing such loops.
 """
 
 import warnings
@@ -42,21 +22,17 @@ import warp as wp
 
 wp.init()
 
-# The warp adjoint zeroes non-finite gradients (see WarpTrajectoryFunc.backward);
-# the torch engine propagates them and lets utils/trainer.py's isfinite check
-# zero them one level up. The two therefore fail differently, so the zeroing is
-# announced once per process instead of happening silently.
+# The warp adjoint zeroes non-finite gradients while the torch engine propagates
+# them, so the zeroing is announced once per process rather than done silently.
 _WARNED_NONFINITE_GRAD = False
 
-# Compile-time constants, so the loops that use them unroll. Do NOT turn these
-# back into kernel parameters (see module docstring).
+# Compile-time constants so their loops unroll; don't make these kernel
+# parameters (see module docstring).
 NUM_WHEELS = wp.constant(3)
 NUM_WHEEL_POINTS = wp.constant(16)
 
 
-# -----------------------------------------------------------------------------
-# 1. Helper math (device functions)
-# -----------------------------------------------------------------------------
+# --- Helper math (device functions) ---
 @wp.func
 def compute_uv_aligned(
     x: float,
@@ -66,7 +42,7 @@ def compute_uv_aligned(
     width: int,
     height: int,
 ):
-    """Grid indices (u, v) matching PyTorch's grid_sample(align_corners=True).
+    """Return grid indices (u, v) matching grid_sample(align_corners=True).
 
     Maps physical range [center - max_coord, center + max_coord] to [0, width-1].
     """
@@ -79,10 +55,10 @@ def compute_uv_aligned(
 def sample_grid_bilinear(
     grid: wp.array3d(dtype=float), b: int, u: float, v: float, width: int, height: int
 ):
-    """Bilinear sample of batch element `b`, replicating the border.
+    """Bilinearly sample batch element `b`, replicating the border.
 
-    padding_mode="border" matches simulator/engine.py's grid_sample call; zero
-    padding would put a phantom cliff at the edge of the property map.
+    Matches simulator/engine.py's padding_mode="border"; zero padding would put a
+    phantom cliff at the map edge.
     """
     u0 = int(wp.floor(u))
     v0 = int(wp.floor(v))
@@ -108,7 +84,7 @@ def sample_normal_bilinear(
     width: int,
     height: int,
 ):
-    """Bilinear sample of a normal field, renormalized after interpolation."""
+    """Bilinearly sample a normal field, renormalized after interpolation."""
     u0 = int(wp.floor(u))
     v0 = int(wp.floor(v))
     w_u = u - float(u0)
@@ -136,7 +112,7 @@ def get_wheel_point_local(i: int, total_points: int, radius: float):
 
 @wp.func
 def sinc_stable(theta: float):
-    """sin(theta)/theta, finite and differentiable at theta = 0.
+    """Return sin(theta)/theta, finite and differentiable at theta = 0.
 
     Mirrors torch.sinc(theta/pi) in simulator/numerical.py::integrate_quaternion.
     """
@@ -159,9 +135,7 @@ def integrate_quat(q: wp.quat, omega: wp.vec3, dt: float):
     return q_new / wp.sqrt(wp.dot(q_new, q_new) + 1.0e-12)
 
 
-# -----------------------------------------------------------------------------
-# 2. Per-timestep kernels
-# -----------------------------------------------------------------------------
+# --- Per-timestep kernels ---
 @wp.kernel
 def count_contacts_kernel(
     step: int,
@@ -175,12 +149,10 @@ def count_contacts_kernel(
     max_coord: wp.vec2,
     contact_counts: wp.array2d(dtype=float),
 ):
-    """Pass 1: how many sample points are penetrating, per robot.
+    """Pass 1: count penetrating sample points per robot.
 
-    The spring force is divided by this count, so it must be known before any
-    force is accumulated — hence a separate launch rather than a fused kernel.
-    The count is a step function of the state and carries no gradient, exactly
-    as in the torch engine (`(dh < 0).float()`).
+    Forces are divided by this count, so it needs its own launch before force
+    accumulation. Like the torch engine's `(dh < 0).float()`, it has no gradient.
     """
     b, w, i = wp.tid()
 
@@ -258,7 +230,7 @@ def accumulate_forces_kernel(
     count = wp.max(contact_counts[step, b], 1.0)
     com_world = x + wp.quat_rotate(q, cog)
 
-    # Contact-point velocity: body motion + wheel spin about the wheel's own axis
+    # Contact-point velocity: body motion + wheel spin about the wheel's own axis.
     wheel_omega_world = wp.quat_rotate(q, wp.vec3(0.0, controls[step, b][w], 0.0))
     v_total = (
         xd
@@ -271,17 +243,14 @@ def accumulate_forces_kernel(
     f_mag = wp.max(-k_s * dist - b_damp * vn, 0.0) / count
     F_spring = n_surf * f_mag
 
-    # Friction is tangential: strip the normal component of the contact velocity
-    # first. Using the full 3D velocity injects a spurious normal term that can
-    # launch the robot off the terrain (same reasoning as simulator/engine.py).
+    # Friction uses the tangential velocity only (see simulator/engine.py).
     v_tangential = v_total - vn * n_surf
     v_mag = wp.sqrt(wp.dot(v_tangential, v_tangential) + 1.0e-12)
     v_dir = v_tangential / (v_mag + 1.0e-6)
 
     F_N = wp.max(wp.dot(F_spring, n_surf), 0.0)
-    # Impulse limit: the momentum share of one contact point is mass / count,
-    # so the divisor is the CONTACT COUNT (it used to be a hard 3). Inert at
-    # dt 2e-3 either way; see simulator/engine.py for the numbers.
+    # Impulse limit with a per-contact momentum share of mass / count; inert at
+    # dt 2e-3 (see simulator/engine.py).
     f_c_mag = wp.min(
         f_val * F_N * wp.tanh(v_mag / slip_ref_velocity), mass * v_mag / count / dt
     )
@@ -324,8 +293,8 @@ def integrate_kernel(
 
     rot_m = wp.quat_to_matrix(q)
     I_world = rot_m * inertia_body * wp.transpose(rot_m)
-    # Closed form beats wp.inverse(I_world): cheaper, and better conditioned in
-    # the adjoint since it never differentiates a matrix inversion.
+    # Closed form instead of wp.inverse(I_world): cheaper, and the adjoint never
+    # differentiates a matrix inversion.
     I_inv_world = rot_m * inertia_body_inv * wp.transpose(rot_m)
 
     F_total = force_acc[step, b] + wp.vec3(0.0, 0.0, -mass * gravity)
@@ -336,10 +305,9 @@ def integrate_kernel(
 
     omega_d = I_inv_world * (T_total - wp.cross(omega, I_world * omega))
 
-    # state.x is the BODY ORIGIN, not the CoM. com_transfer > 0 subtracts the
-    # alpha x r + omega x (omega x r) transfer, r = quat_rotate(q, cog); off by
-    # default because every production checkpoint trained without it. Same
-    # switch as PhysicsEngineConfig.com_transfer / simulator/engine.py.
+    # state.x is the body origin, not the CoM; com_transfer > 0 subtracts
+    # alpha x r + omega x (omega x r), r = quat_rotate(q, cog). Off by default,
+    # as in simulator/engine.py.
     acc = F_total / mass
     if com_transfer > 0.0:
         r_com = wp.quat_rotate(q, cog)
@@ -347,8 +315,8 @@ def integrate_kernel(
 
     next_xd = xd + acc * dt
     next_omega = omega + omega_d * dt
-    # Matches the torch engine's clamps; a runaway step would otherwise poison
-    # every later step of the rollout and its adjoint.
+    # Same clamps as the torch engine; a runaway step would poison the rest of the
+    # rollout and its adjoint.
     next_xd = wp.vec3(
         wp.clamp(next_xd[0], -50.0, 50.0),
         wp.clamp(next_xd[1], -50.0, 50.0),
@@ -366,15 +334,11 @@ def integrate_kernel(
     state_q[step + 1, b] = integrate_quat(q, next_omega, dt)
 
 
-# -----------------------------------------------------------------------------
-# 3. Autograd bridge
-# -----------------------------------------------------------------------------
+# --- Autograd bridge ---
 class WarpTrajectoryFunc(torch.autograd.Function):
-    """Rolls the trajectory on a wp.Tape and hands the adjoint back to torch.
+    """Roll the trajectory on a wp.Tape and hand the adjoint back to torch.
 
-    Stiffness is passed through as a plain input with no gradient: it is not a
-    predicted or adaptable property (see ADAPT_HEADS in utils/experiment.py), so
-    taping it would only add work.
+    Stiffness gets no gradient: it is neither predicted nor adapted.
     """
 
     @staticmethod
@@ -422,8 +386,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         wp_kf = to_wp(friction_grid_t, wp.float32)
         wp_ks = to_wp(stiffness_grid_t, wp.float32, grad=False)
 
-        # State trajectories: one slot per step, so the tape's reverse pass finds
-        # every launch's primal inputs still intact.
+        # One slot per step keeps every launch's primal inputs intact for the tape.
         state_x = wp.zeros(
             (num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True
         )
@@ -442,8 +405,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         wp.copy(state_xd[0], to_wp(init_xd, wp.vec3, grad=False))
         wp.copy(state_omega[0], to_wp(init_omega, wp.vec3, grad=False))
 
-        # Per-step accumulators, likewise one slot per step: reusing a single
-        # buffer would need a zeroing pass that the tape cannot differentiate.
+        # Per-step accumulators too: a reused buffer needs a zeroing pass the tape
+        # cannot differentiate.
         counts = wp.zeros(
             (num_steps, B), dtype=float, device=device, requires_grad=True
         )
@@ -533,8 +496,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         ctx.wp_inputs = {"ctrl": wp_ctrl, "z": wp_z, "n": wp_n, "kf": wp_kf}
         ctx.state = (state_x, state_q, state_xd, state_omega)
 
-        # Drop the seeded step 0 so the outputs line up with the torch engine,
-        # whose first returned pose is the state *after* one step.
+        # Drop the seeded step 0 to match the torch engine, whose first pose is the
+        # state after one step.
         out_q_xyzw = wp.to_torch(state_q)[1:]
         return (
             wp.to_torch(state_x)[1:].clone(),
@@ -553,7 +516,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             g = g.contiguous()
             if quat:  # WXYZ -> XYZW
                 g = g[..., [1, 2, 3, 0]].contiguous()
-            # step 0 is the (non-differentiable) seeded initial state
+            # Step 0 is the non-differentiable seeded initial state.
             wp.copy(arr.grad[1:], wp.from_torch(g, dtype=arr.dtype))
 
         seed(state_x, grad_x)
@@ -584,7 +547,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             return torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
 
         return (
-            None,  # init_x   — seeded by a detached plane fit, see models/simulator_wp.py
+            None,  # init_x: detached plane fit
             None,  # init_q
             None,  # init_xd
             None,  # init_omega
@@ -614,7 +577,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
 
 class WarpStaticEngine:
-    """Holds the robot constants; state and scratch are allocated per rollout."""
+    """Hold the robot constants; state and scratch are allocated per rollout."""
 
     def __init__(
         self,
@@ -640,7 +603,7 @@ class WarpStaticEngine:
     def run_trajectory(
         self, init_state, control_velocities, world_config, engine_config
     ):
-        """control_velocities: (num_steps, B, 3) wheel speeds. Returns (T,B,...)."""
+        """Roll out (num_steps, B, 3) wheel speeds; outputs are (num_steps, B, ...)."""
         num_steps = control_velocities.shape[0]
         B = control_velocities.shape[1]
         stiffness = world_config.k_stiffness

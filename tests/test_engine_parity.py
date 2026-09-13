@@ -1,29 +1,10 @@
-"""Torch-engine vs. Warp-engine parity, forward *and* backward.
+"""Torch-engine vs. Warp-engine parity, forward and backward.
 
-The Warp engine exists to make the rollout ~10x cheaper, but it is only useful if
-its gradients match the torch engine's. They did not: the whole rollout used to
-live inside one kernel as `for step in range(num_steps)` with `num_steps` a kernel
-*parameter*, so Warp could not unroll it, and a dynamic loop that mutates state
-read in later iterations violates Warp's SSA assumption (it emits
-`assign(var1, var2)` in `materialize_redefinitions`). The adjoint then substitutes
-end-of-loop values for per-iteration values. Measured symptom, gradient wrt the
-support surface vs. the torch engine:
-
-    steps    50 -> cosine  0.9998, norm ratio 1.13
-    steps   100 -> cosine -0.0122, norm ratio 5.5e6
-    steps   250 -> NaN
-    steps  1000 -> NaN                (the length actually used in training)
-
-So the forward agreed to 3.3e-4 m while the backward was garbage, and short
-rollouts looked fine. Hence this file checks gradients at the *full* rollout
-length rather than a convenient short one, cross-checks both engines against
-finite differences, and statically forbids the loop construct that caused it.
-
-Most tests need a GPU and so only run on the cluster; the static guard runs
-everywhere.
-
-Stiffness is deliberately not covered: it is no longer a predicted or adaptable
-property (see ADAPT_HEADS in utils/experiment.py), only a simulator input.
+A dynamic loop in a Warp kernel gets an adjoint built on end-of-loop values:
+the forward still agreed while support gradients went to cosine ~0 at 100 steps
+and NaN at 1000. So gradients are checked at full rollout length, both engines
+are cross-checked against finite differences, and the loop construct is banned
+statically. Stiffness is not covered: it is only a simulator input now.
 """
 
 import warnings
@@ -32,10 +13,7 @@ import pytest
 import torch
 from _helpers import make_sim as _make_sim_factory
 
-# Only the tests that actually roll out the warp engine need a GPU; the static
-# dynamic-loop guard below is pure source parsing and must run in the local suite,
-# where it is the only thing standing between a refactor and a silently wrong
-# adjoint that nobody sees until a cluster run.
+# Only warp rollouts need a GPU; the static dynamic-loop guard must run locally.
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="the warp engine is CUDA-only"
 )
@@ -45,35 +23,26 @@ GRID_N = 128
 RES = 0.1
 MAX_COORD = 6.4
 DT = 1e-3
-# Training runs 2e-3 (PhysicsEngineConfig.dt, chosen by sweep_dt.py). Parity was
-# only ever checked at 1e-3, so a divergence that only shows up at the step size
-# production uses would have gone unseen. Both are covered now.
+# Training runs at 2e-3 (PhysicsEngineConfig.dt), so parity is checked there too.
 DT_TRAIN = 2e-3
 DTS = (DT, DT_TRAIN)
 
-# MEASURED, not aspirational: scripts/analysis/measure_engine_parity.py, job
-# 11564503 (gpufast, V100, IEEE fp32, slurm/out/audit_engine_parity_11564503.out).
-# Worst case over dt in {1e-3, 2e-3} x steps in {50, 250, 1000}:
+# Measured worst case (V100, fp32) over dt in {1e-3, 2e-3} x steps {50, 250, 1000}:
 #
-#   final pose        1.6e-4 m          (at dt 2e-3, 1000 steps)
+#   final pose        1.6e-4 m          (dt 2e-3, 1000 steps)
 #   support grad      cosine 0.999384   norm ratio 1.0255
 #   friction grad     cosine 0.999949   norm ratio 1.0119
-#   warp self-vs-self 7.5e-9 m          (the nondeterminism floor)
+#   warp self-vs-self 7.5e-9 m          (nondeterminism floor)
+#   TF32 effect       cosine 0.99892    norm ratio 1.018
 #
-# The old bounds (2e-3 m, cosine 0.99, ratio 0.5..2.0) were looser than the TF32
-# effect the configs were changed to avoid (cosine 0.99892, ratio 1.018), so a
-# TF32-sized divergence would have passed. GRAD_COS_MIN is now tighter than that
-# effect. GRAD_RATIO_RANGE cannot be: the engines' own worst norm ratio (1.0255)
-# is already larger than TF32's, so 1.05 is the tightest honest bound.
+# GRAD_COS_MIN is tighter than the TF32 effect; the ratio cannot be, since the
+# engines' own 1.0255 already exceeds it, so 1.05 is the tightest honest bound.
 POS_ATOL = 5e-4
 GRAD_COS_MIN = 0.999
 GRAD_RATIO_RANGE = (0.95, 1.05)
-# The batched (B=4, distinct terrain per element) rollouts were not part of the
-# measurement above and stack four problems' worth of contact-boundary jitter
-# into one norm, so they keep a looser magnitude bound.
+# Unmeasured B=4 distinct-terrain rollouts stack more contact jitter into one norm.
 GRAD_RATIO_RANGE_BATCHED = (0.9, 1.1)
-# Measured floor for "the two rollouts are the same run": torch self-vs-self is
-# bit-identical, warp self-vs-self 7.5e-9 m (job 11564503, section 7).
+# Same-run floor: torch self-vs-self is bit-identical, warp 7.5e-9 m.
 SAME_RUN_ATOL = 1e-4
 
 
@@ -85,15 +54,11 @@ def _make_sim(engine, t_horizon, batch_size=1, dt=DT):
 
 
 def _make_inputs(t_horizon, batch_size=1, n_ctrl=50, distinct_batch=False, dt=DT):
-    """Flat terrain, forward drive with a slight turn.
+    """Build flat terrain and a forward drive with a slight turn.
 
-    The turn matters: on a perfectly straight drive the friction gradient is
-    legitimately near zero, so a friction check would pass vacuously.
-
-    `distinct_batch` gives every batch element its own sloped terrain, its own
-    friction and its own wheel speeds. Without that, a batch is B copies of one
-    problem and a wrapper that samples terrain[0] for every robot looks perfectly
-    correct — which is exactly the bug the warp engine shipped with.
+    The turn keeps the friction gradient non-zero. `distinct_batch` gives each
+    element its own slope, friction and wheel speeds, so sampling terrain[0]
+    for every robot shows up.
     """
     support = torch.zeros(batch_size, GRID_N, GRID_N, device=DEVICE, requires_grad=True)
     friction = torch.full(
@@ -105,8 +70,7 @@ def _make_inputs(t_horizon, batch_size=1, n_ctrl=50, distinct_batch=False, dt=DT
     if distinct_batch:
         ramp = torch.linspace(-1.0, 1.0, GRID_N, device=DEVICE)
         slopes = torch.linspace(0.02, 0.10, batch_size, device=DEVICE)
-        # b-th element gets a distinct tilt, so mixing up batch indices moves the
-        # trajectory rather than cancelling out
+        # A distinct tilt per element, so mixed-up batch indices move the trajectory.
         terrain = slopes.view(-1, 1, 1) * ramp.view(1, 1, -1).expand(
             batch_size, GRID_N, GRID_N
         )
@@ -160,9 +124,7 @@ def _ratio(a, b):
     return (a.norm() / b.norm().clamp_min(1e-30)).item()
 
 
-# ---------------------------------------------------------------------------
-# Forward parity
-# ---------------------------------------------------------------------------
+# --- Forward parity ---
 
 
 @requires_cuda
@@ -178,15 +140,11 @@ def test_forward_pose_matches_torch(n_steps, dt):
     )
 
 
-# ---------------------------------------------------------------------------
-# Gradient parity — the actual gate
-# ---------------------------------------------------------------------------
+# --- Gradient parity ---
 
 
-# 100 steps is where the old fused-kernel adjoint first detonated (cosine went to
-# ~0 and the norm ratio to 5.5e6); 1000 is the length training and adaptation
-# really use, and is where it returned NaN. Both must be covered or the
-# regression walks straight back in.
+# The dynamic-loop adjoint first broke at 100 steps and went NaN at 1000, the
+# training length; both must stay covered.
 @requires_cuda
 @pytest.mark.parametrize("dt", DTS)
 @pytest.mark.parametrize("n_steps", [50, 100, 250, 1000])
@@ -219,10 +177,8 @@ def test_gradients_match_torch(n_steps, dt):
 def test_batch_elements_are_independent(engine):
     """Element b of a batched rollout must equal that window run on its own.
 
-    This is the check that the warp engine's original `world_config.z_grid[0]`
-    bug needed and never got: it sampled batch element 0's terrain for every
-    robot, which is invisible whenever a test batch is B copies of one problem,
-    and invisible at B=1. Training runs at B=48 with 48 different terrains.
+    Catches sampling element 0's terrain for every robot (`z_grid[0]`), which is
+    invisible at B=1 or with identical batch elements.
     """
     n_steps, B = 100, 4
     t_horizon = n_steps * DT
@@ -251,7 +207,7 @@ def test_batch_elements_are_independent(engine):
             f"others — batch elements are not independent (terrain indexing?)"
         )
 
-    # and the elements must actually differ, or the check above is vacuous
+    # The elements must actually differ, or the check above is vacuous.
     spread = (batched - batched.mean(dim=0)).norm(dim=-1).max().item()
     assert spread > 1e-3, "batch elements are identical; the test proves nothing"
 
@@ -261,8 +217,7 @@ def test_batch_elements_are_independent(engine):
 def test_gradients_match_torch_batched(n_steps):
     """Gradient parity at B>1 with a different terrain per element.
 
-    B=1 parity cannot see a wrapper that mixes up batch indices, and training runs
-    batched. Each element's terrain gradient must land on that element's slice.
+    Catches a wrapper that mixes up batch indices, which B=1 parity cannot see.
     """
     B = 4
     _, gs_t, gf_t = _rollout("torch", n_steps, B, distinct_batch=True)
@@ -286,10 +241,8 @@ def test_gradients_match_torch_batched(n_steps):
 def test_initial_pose_override_is_honoured(engine):
     """initial_state x/q must override the terrain-fitted start pose.
 
-    The segmented trajectory loss (utils/trainer.py) seeds each segment at the
-    GT pose closest to its own start timestamp through exactly this path. The
-    warp wrapper used to ignore x/q and silently re-seed from the plane fit,
-    which produces no error — just wrong segments.
+    The segmented loss seeds each segment from GT this way; catches a wrapper
+    silently re-seeding from the plane fit.
     """
     n_steps = 50
     t_horizon = n_steps * DT
@@ -316,11 +269,8 @@ def test_initial_pose_override_is_honoured(engine):
 def test_returned_timestamps_survive_epoch_scale_input(engine):
     """Predicted timestamps must resolve a 1 s window sitting at Unix-epoch scale.
 
-    The dataset supplies absolute timestamps (~1.76e9). float32 spacing up there is
-    ~128 s, so building the query grid at the default dtype collapses every sample
-    in the window onto one value. Nothing crashes — but every GT metric is
-    timestamp-matched, so all of them silently collapse onto predicted index 0.
-    That is exactly what `--engine warp` did before this test existed.
+    float32 spacing at ~1.76e9 is ~128 s; catches a float32 query grid that
+    collapses every timestamp-matched GT metric onto predicted index 0.
     """
     n_steps = 100
     t_horizon = n_steps * DT
@@ -352,17 +302,11 @@ def test_returned_timestamps_survive_epoch_scale_input(engine):
 @requires_cuda
 @pytest.mark.parametrize("engine", ["torch", "warp"])
 def test_gradient_matches_finite_differences(engine):
-    """Independent reference: perturb single terrain cells and difference the loss.
+    """Each engine's support gradient must match central finite differences.
 
-    The two engines share a contact model, so agreeing with each other could in
-    principle mean agreeing on the same mistake — finite differences do not care.
-    The torch case matters as much as the warp one: it is the reference the parity
-    test above trusts, and nothing else checks it.
-
-    Cells are chosen by largest |analytic gradient| rather than hardcoded. The
-    robot's wheel contacts sit off the grid centre (URDF: front wheels at
-    (0, ±0.36), rear at (−0.697, 0)), so the centre cell carries little or no
-    gradient — a fixed cell list silently verifies nothing.
+    Catches both engines agreeing on the same mistake; torch is the parity
+    reference and nothing else checks it. Cells are picked by largest |gradient|
+    since wheel contacts sit off the grid centre.
     """
     n_steps = 250
     t_horizon = n_steps * DT
@@ -398,9 +342,8 @@ def test_gradient_matches_finite_differences(engine):
         zm[0, i, j] -= eps
         numeric = (loss_at(zp) - loss_at(zm)) / (2 * eps)
         rel = abs(numeric - analytic) / max(abs(numeric), abs(analytic), 1e-12)
-        # Loose: the contact gate is a hard `dist < 0` switch, so a finite
-        # perturbation can add or drop sample points that the derivative at the
-        # unperturbed point knows nothing about.
+        # Loose: the hard `dist < 0` contact gate lets a finite perturbation add
+        # or drop contact points the derivative cannot see.
         assert rel < 0.35, (
             f"{engine} cell ({i},{j}): analytic={analytic:.6e} "
             f"finite-diff={numeric:.6e} (rel err {rel:.2%})"
@@ -411,10 +354,9 @@ def test_gradient_matches_finite_differences(engine):
 
 
 def test_both_wrappers_share_one_default_horizon():
-    """T_horizon was 1.0 in the torch wrapper and 5.0 in the warp one.
+    """Both wrappers must share one T_horizon default.
 
-    The trainer's single-segment path passes no horizon, so `--engine warp`
-    silently rolled out 5x further than `--engine torch` on the same config.
+    The single-segment path passes no horizon; catches warp rolling out 5x further.
     """
     import inspect
 
@@ -446,13 +388,11 @@ def test_wheel_geometry_has_one_source():
         assert torch.equal(sim.robot_model.cog, ref.cog)
 
 
-# ---------------------------------------------------------------------------
-# Non-finite gradients: the two engines fail differently
-# ---------------------------------------------------------------------------
+# --- Non-finite gradients: the two engines fail differently ---
 
 
 def _rollout_with_poisoned_cotangent(engine, n_steps=50):
-    """Backprop a loss whose cotangent contains an inf, and return d(support)."""
+    """Backprop a loss whose cotangent contains an inf; return d(support)."""
     dt = DT
     t_horizon = n_steps * dt
     sim = _make_sim(engine, t_horizon, dt=dt)
@@ -468,14 +408,10 @@ def _rollout_with_poisoned_cotangent(engine, n_steps=50):
 
 @requires_cuda
 def test_warp_zeroes_non_finite_gradients_but_says_so():
-    """The warp adjoint silently zeroed non-finite gradients; now it warns once.
+    """The warp adjoint must zero non-finite gradients and warn once.
 
-    The torch engine propagates them instead and lets utils/trainer.py's
-    `isfinite` check zero them one level up (utils/trainer.py:462-465), so the
-    two engines fail differently on the same input. Zeroing is kept -- the
-    trainer does the same thing -- but it is no longer silent, because a
-    NaN-producing rollout that quietly contributes a zero gradient is
-    indistinguishable from a converged one.
+    Torch propagates them and the trainer's `isfinite` check zeroes them; a silent
+    zero is indistinguishable from a converged rollout.
     """
     import simulator.engine_wp as ewp
 
@@ -484,8 +420,7 @@ def test_warp_zeroes_non_finite_gradients_but_says_so():
         g_warp = _rollout_with_poisoned_cotangent("warp")
     assert torch.isfinite(g_warp).all(), "warp still returned a non-finite gradient"
 
-    # and the warning fires only once per process, so a training loop is not
-    # flooded by it
+    # The warning fires only once per process, so training logs are not flooded.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         _rollout_with_poisoned_cotangent("warp")
@@ -494,7 +429,7 @@ def test_warp_zeroes_non_finite_gradients_but_says_so():
 
 @requires_cuda
 def test_torch_propagates_non_finite_gradients():
-    """The other half of the asymmetry, pinned so it is a decision, not a bug."""
+    """The torch engine must propagate non-finite gradients (deliberate asymmetry)."""
     g_torch = _rollout_with_poisoned_cotangent("torch")
     assert not torch.isfinite(g_torch).all(), (
         "the torch engine now sanitises its gradients too -- update the "
@@ -502,24 +437,15 @@ def test_torch_propagates_non_finite_gradients():
     )
 
 
-# ---------------------------------------------------------------------------
-# Compiler-level guard
-# ---------------------------------------------------------------------------
+# --- Compiler-level guard ---
 
 
 def test_warp_kernels_have_no_dynamic_loops():
-    """Static guard: no `@wp.kernel` may loop over a range() bound by a runtime value.
+    """No `@wp.kernel` may loop over a range() bound by a runtime value.
 
-    Warp only unrolls loops whose range() arguments are compile-time constants
-    (warp.config.max_unroll = 16). Anything else becomes a dynamic loop, and a
-    dynamic loop that mutates state read in a later iteration gets an adjoint
-    built on end-of-loop values — the bug this whole file exists to prevent.
-
-    Checked by parsing the source rather than by watching for Warp's build-time
-    warning: that warning is emitted during codegen, which Warp skips entirely
-    when it serves the kernel from its on-disk cache, so a warning-based check
-    passes vacuously on every run after the first. This one is deterministic,
-    needs no GPU, and so runs in the normal local suite.
+    Warp only unrolls compile-time-constant ranges; a dynamic loop gets a wrong
+    adjoint. Source is parsed because Warp's codegen warning is skipped when a
+    kernel is served from its on-disk cache.
     """
     import ast
     import pathlib
@@ -536,7 +462,7 @@ def test_warp_kernels_have_no_dynamic_loops():
                 return True
         return False
 
-    # module-level names bound to wp.constant(...) or a plain int are unrollable
+    # Module-level names bound to wp.constant(...) or a plain int are unrollable.
     constants = set()
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
