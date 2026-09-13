@@ -30,6 +30,7 @@ import warnings
 
 import pytest
 import torch
+from _helpers import make_sim as _make_sim_factory
 
 # Only the tests that actually roll out the warp engine need a GPU; the static
 # dynamic-loop guard below is pure source parsing and must run in the local suite,
@@ -77,25 +78,10 @@ SAME_RUN_ATOL = 1e-4
 
 
 def _make_sim(engine, t_horizon, batch_size=1, dt=DT):
-    if engine == "torch":
-        from models.simulator import Simulator
-    else:
-        from models.simulator_wp import Simulator
-
-    sim = Simulator(
-        robot="helhest",
-        batch_size=batch_size,
-        device=DEVICE,
-        T_horizon=t_horizon,
-        dt=dt,
+    return _make_sim_factory(
+        t_horizon, dt, engine=engine, device=DEVICE, max_coord=MAX_COORD,
+        eval_mode=False,
     )
-    sim.update_world_config(
-        res=RES,
-        max_coord=MAX_COORD,
-        side_range=(-MAX_COORD, MAX_COORD),
-        fwd_range=(-MAX_COORD, MAX_COORD),
-    )
-    return sim
 
 
 def _make_inputs(t_horizon, batch_size=1, n_ctrl=50, distinct_batch=False, dt=DT):
@@ -454,7 +440,7 @@ def test_wheel_geometry_has_one_source():
         torch.tensor([[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]),
     ), "the source of truth no longer matches the URDF tuple"
     for cls in (TorchSim, WarpSim):
-        sim = cls(robot="helhest", batch_size=1, device="cpu")
+        sim = cls(robot="helhest", device="cpu")
         assert torch.equal(sim.robot_model.wheel_centers, ref.wheel_centers)
         assert torch.equal(sim.robot_model.wheel_radii, ref.wheel_radii)
         assert torch.equal(sim.robot_model.cog, ref.cog)

@@ -1,10 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from simulator.numerical import (
-    integrate_quaternion,
-    quat_to_rotmat,
-)
+from simulator.numerical import integrate_quaternion
 from simulator.utils import (
     PhysicsEngineConfig,
     PhysicsState,
@@ -12,6 +9,7 @@ from simulator.utils import (
     RobotModelConfig,
     WorldConfig,
 )
+from utils.geometry import quat_to_rotmat
 
 ###############################################################################
 # Less Simple Model
@@ -246,7 +244,7 @@ class DPhysicsEngine(torch.nn.Module):
         # F_c_raw_mag = mu * F_N * tanh(v)
         # tanh(|v_t| / v_ref): v_ref is the slip speed at which traction
         # saturates. At the default 1.0 this is the historical bare tanh(|v_t|).
-        v_ref = getattr(self.config, "slip_ref_velocity", 1.0) or 1.0
+        v_ref = self.config.slip_ref_velocity or 1.0
         F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag / v_ref)
 
         # Impulse limit: friction may not do more than kill the tangential
@@ -314,7 +312,7 @@ class DPhysicsEngine(torch.nn.Module):
         # r = R @ cog. The transfer terms were dropped historically; every
         # production checkpoint was trained without them, so this is OFF by
         # default and turning it on changes the dynamics.
-        if getattr(self.config, "com_transfer", False):
+        if self.config.com_transfer:
             xdd = (
                 xdd_com
                 - torch.linalg.cross(omega_d, r_com)
@@ -359,5 +357,3 @@ class DPhysicsEngine(torch.nn.Module):
             device=state.device,
         )
 
-    def get_dt(self) -> float:
-        return self.config.dt

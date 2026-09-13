@@ -2,24 +2,28 @@ from typing import Optional
 
 import torch
 
+from models.simulator import (
+    _apply_initial_state_override,
+    _build_world_config,
+    _fit_plane_pose,
+    _update_world_config,
+)
 from simulator.engine import DPhysicsEngine
 from simulator.engine_wp import WarpStaticEngine
-from simulator.numerical import quat_to_rotmat
 from simulator.utils import (
     PhysicsEngineConfig,
     PhysicsState,
     WorldConfig,
-    find_init_rob_position,
     raise_to_clearance,
     robot_model_config,
 )
+from utils.geometry import quat_to_rotmat
 
 
 class Simulator(torch.nn.Module):
     def __init__(
         self,
         robot="helhest",
-        batch_size=1,
         device=None,
         T_horizon=1.0,
         dt=2e-3,
@@ -34,14 +38,12 @@ class Simulator(torch.nn.Module):
 
         self.robot_model = robot_model
 
-        self.batch_size = batch_size
-        self.T_horizon = torch.tensor(T_horizon)
+        self.T_horizon = T_horizon
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
 
-        MAX_STEPS = 100_000
-        self.engine = WarpStaticEngine(robot_model, batch_size, MAX_STEPS, device)
+        self.engine = WarpStaticEngine(robot_model, device)
         self.engine_config = PhysicsEngineConfig(dt=dt, com_transfer=com_transfer)
         self._geom = DPhysicsEngine(self.engine_config, robot_model).to(device)
         self.res = None
@@ -53,21 +55,14 @@ class Simulator(torch.nn.Module):
         self, res=None, max_coord=None, side_range=None, fwd_range=None
     ):
         """Update the world configuration parameters."""
-        if res is not None:
-            self.res = res
-        if max_coord is not None:
-            self.max_coord = max_coord
-        if side_range is not None:
-            self.side_range = side_range
-        if fwd_range is not None:
-            self.fwd_range = fwd_range
+        _update_world_config(
+            self, res=res, max_coord=max_coord, side_range=side_range, fwd_range=fwd_range
+        )
 
     @torch.no_grad()
     def fit_plane_pose(self, world_config: WorldConfig, batch_size: int):
         """Initial pose from the 3-point per-wheel plane fit. See models/simulator.py."""
-        return find_init_rob_position(
-            world_config, self.robot_model, batch_size, self.device
-        )
+        return _fit_plane_pose(self.robot_model, self.device, world_config, batch_size)
 
     @torch.no_grad()
     def raise_to_clearance(self, x, q, world_config: WorldConfig):
@@ -114,16 +109,7 @@ class Simulator(torch.nn.Module):
             Angular velocity output. Shape (B, SimSteps, 3).
         """
         # 1. Setup World
-        world_config = WorldConfig(
-            z_grid=properties["support"],
-            grid_res=self.res,
-            max_coord=self.max_coord,
-            side_range=self.side_range,
-            fwd_range=self.fwd_range,
-            k_friction=properties["friction"],
-            # Stiffness is not a predicted property
-            k_stiffness=properties.get("stiffness", 400_000.0),
-        )
+        world_config = _build_world_config(self, properties)
 
         # 2. Setup Initial State
         actual_bs = vel_ctrl.shape[0]
@@ -133,21 +119,11 @@ class Simulator(torch.nn.Module):
         with torch.no_grad():
             state.x, state.q = self.fit_plane_pose(world_config, actual_bs)
 
-        if initial_state is not None:
-            # "x"/"q" override the terrain-fitted pose. The segmented trajectory
-            # loss (utils/trainer.py) relies on this to seed each segment at the
-            # GT pose closest to its own start timestamp; ignoring them here
-            # would silently restart every segment at the fitted origin pose.
-            if "x" in initial_state:
-                state.x = initial_state["x"].to(self.device)
-            if "q" in initial_state:
-                state.q = initial_state["q"].to(self.device)
-            if "xd" in initial_state:
-                state.xd = initial_state["xd"].to(self.device)
-            if "omega" in initial_state:
-                state.omega = initial_state["omega"].to(self.device)
-            if "wheel_omega" in initial_state:
-                state.wheel_omega = initial_state["wheel_omega"].to(self.device)
+        # "x"/"q" override the terrain-fitted pose. The segmented trajectory loss
+        # (utils/trainer.py) relies on this to seed each segment at the GT pose
+        # closest to its own start timestamp; skipping it would silently restart
+        # every segment at the fitted origin pose.
+        state = _apply_initial_state_override(state, initial_state, self.device)
 
         # The plane fit only makes the wheel-triangle tangent; without this the
         # wheel circumference points start inside rough terrain and the contact
@@ -156,7 +132,7 @@ class Simulator(torch.nn.Module):
 
         # 3. Interpolate Controls
         sim_dt = self.engine_config.dt
-        horizon = float(self.T_horizon if T_horizon is None else T_horizon)
+        horizon = self.T_horizon if T_horizon is None else T_horizon
         # round, not truncate: 1.0/1e-3 lands on 999.9999... in binary floating
         # point, which silently made warp rollouts one step shorter than torch's
         num_steps = int(round(horizon / sim_dt))

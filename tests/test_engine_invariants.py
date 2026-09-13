@@ -1,8 +1,7 @@
 """Physical sanity invariants of the differentiable spring-contact engine."""
 
 import torch
-
-from models.simulator import Simulator
+from _helpers import make_sim as _make_sim_factory
 
 GRID_N = 64
 RES = 0.1
@@ -18,22 +17,9 @@ def _flat_props(mu, k=4e5):
 
 
 def _make_sim(t_horizon, dt=0.002, com_transfer=False):
-    sim = Simulator(
-        robot="helhest",
-        batch_size=1,
-        device="cpu",
-        T_horizon=t_horizon,
-        dt=dt,
-        com_transfer=com_transfer,
+    return _make_sim_factory(
+        t_horizon, dt, com_transfer=com_transfer, max_coord=MAX_COORD
     )
-    sim.update_world_config(
-        res=RES,
-        max_coord=MAX_COORD,
-        side_range=(-MAX_COORD, MAX_COORD),
-        fwd_range=(-MAX_COORD, MAX_COORD),
-    )
-    sim.eval()
-    return sim
 
 
 def _rollout(sim, props, wheel_omega, t_horizon):
@@ -89,8 +75,8 @@ def test_impulse_limit_is_inert_at_the_training_dt():
     both halves cheaply: at dt 2e-3 the cap never binds, and it is not dead code
     (a 25x larger dt makes it bind).
     """
-    from simulator.numerical import quat_to_rotmat
     from simulator.utils import PhysicsState, WorldConfig
+    from utils.geometry import quat_to_rotmat
 
     def min_headroom(dt):
         sim = _make_sim(0.2, dt=dt)

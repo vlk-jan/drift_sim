@@ -4,22 +4,15 @@ from typing import Tuple, Union
 import torch
 from tensordict import TensorClass
 
-from simulator.numerical import (
-    interpolate_grid,
-    quat_to_rotmat,
-    unit_quaternion,
-)
+from simulator.numerical import interpolate_grid
+from utils.geometry import quat_to_rotmat
 
 
 # ---------------------------------------------------------------------
 # Configuration Classes
 # ---------------------------------------------------------------------
-class BaseConfig:
-    """Base class holding a chunk of the simulation configuration."""
-
-
 @dataclass
-class WorldConfig(BaseConfig):
+class WorldConfig:
     """Physical constants of the world and the coordinates of the world frame.
 
     Grids use torch's "xy" meshgrid indexing: the first dimension is y and the
@@ -84,7 +77,12 @@ class WorldConfig(BaseConfig):
                 dtype=torch.float32, device=self.z_grid.device
             )
 
-        z_grid_grad = self._compute_heightmap_gradients(self.z_grid)  # (B, 2, D, D)
+        # Gradients of the heightmap along the x/y axes (torch's "xy" indexing:
+        # the first dim is y, the second is x).
+        z_grid_grad = torch.stack(
+            torch.gradient(self.z_grid, spacing=self.grid_res, dim=(2, 1), edge_order=2),
+            dim=1,
+        )  # (B, 2, D, D)
         ones = torch.ones_like(z_grid_grad[:, 0]).unsqueeze(1)
         self.normals = torch.cat((-z_grid_grad, ones), dim=1)
         self.normals = self.normals / torch.linalg.norm(
@@ -122,25 +120,6 @@ class WorldConfig(BaseConfig):
             dim=1,
         )  # (B, 6, H, W)
 
-    def _compute_heightmap_gradients(self, z_grid: torch.Tensor) -> torch.Tensor:
-        """
-        Computes the gradients of a heightmap along the x and y axes using
-            torch.gradient.
-
-        **Note**: The input grid is assumed to use torch's "xy" indexing convention,
-            i.e., the first dimension is
-                   the y-axis and the second dimension is the x-axis.
-
-        Parameters:
-        - z_grid: Heightmap tensor of shape (B, H, W).
-        - grid_res: Resolution of the grid in meters.
-
-        """
-        return torch.stack(
-            torch.gradient(z_grid, spacing=self.grid_res, dim=(2, 1), edge_order=2),
-            dim=1,
-        )
-
     @property
     def grid_center(self) -> torch.Tensor:
         """
@@ -157,7 +136,7 @@ class WorldConfig(BaseConfig):
 
 
 @dataclass
-class RobotModelConfig(BaseConfig):
+class RobotModelConfig:
     """Mass properties and wheel geometry of one robot.
 
     Every field is required: there is no such thing as a default robot, and the
@@ -200,32 +179,15 @@ def helhest_robot_model() -> "RobotModelConfig":
     )
 
 
-def marv_robot_model() -> "RobotModelConfig":
-    return RobotModelConfig(
-        mass=67.8,
-        wheel_radii=torch.tensor([0.12, 0.12, 0.12]),
-        wheel_centers=torch.tensor(
-            [[0.245, 0.2025, 0.0], [0.245, -0.2025, 0.0], [-0.245, 0.0, 0.0]]
-        ),
-        inertia_tensor=torch.diag(torch.tensor([15.0, 15.0, 30.0])),
-    )
-
-
-ROBOT_MODELS = {"helhest": helhest_robot_model, "marv": marv_robot_model}
-
-
 def robot_model_config(robot: str = "helhest") -> "RobotModelConfig":
     """Wheel geometry / mass / inertia of a supported robot."""
-    try:
-        return ROBOT_MODELS[robot]()
-    except KeyError:
-        raise ValueError(
-            f"Unsupported robot: {robot!r} (have {sorted(ROBOT_MODELS)})"
-        ) from None
+    if robot != "helhest":
+        raise ValueError(f"Unsupported robot: {robot!r} (have ['helhest'])")
+    return helhest_robot_model()
 
 
 @dataclass
-class PhysicsEngineConfig(BaseConfig):
+class PhysicsEngineConfig:
     """Physical constants of the simulation: gravity, time step, limits.
 
     Attributes:
@@ -314,7 +276,9 @@ class PhysicsState(TensorClass):
         base = {
             "x": torch.zeros(batch_size, 3),
             "xd": torch.zeros(batch_size, 3),
-            "q": unit_quaternion(batch_size, device=device),
+            "q": torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).repeat(
+                batch_size, 1
+            ),
             "omega": torch.zeros(batch_size, 3),
             "wheel_omega": torch.zeros(batch_size, 3, device=device),
             "batch_size": batch_size,

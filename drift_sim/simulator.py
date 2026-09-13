@@ -3,7 +3,6 @@ from typing import Optional
 import torch
 
 from simulator.engine import DPhysicsEngine
-from simulator.numerical import quat_to_rotmat
 from simulator.utils import (
     PhysicsEngineConfig,
     PhysicsState,
@@ -12,13 +11,81 @@ from simulator.utils import (
     raise_to_clearance,
     robot_model_config,
 )
+from utils.geometry import quat_to_rotmat
+
+
+def _update_world_config(sim, res=None, max_coord=None, side_range=None, fwd_range=None):
+    """Update a Simulator wrapper's world-configuration parameters in place.
+
+    Shared by both models/simulator.py::Simulator and
+    models/simulator_wp.py::Simulator.
+    """
+    if res is not None:
+        sim.res = res
+    if max_coord is not None:
+        sim.max_coord = max_coord
+    if side_range is not None:
+        sim.side_range = side_range
+    if fwd_range is not None:
+        sim.fwd_range = fwd_range
+
+
+def _fit_plane_pose(robot_model, device, world_config: WorldConfig, batch_size: int):
+    """Initial pose from the 3-point (per-wheel) plane fit through the height field.
+
+    Detached: a single bad cell under one wheel swings the fit a lot. Left
+    differentiable, gradient descent exploits it as a cheap shortcut to fix
+    rotational trajectory error by locally saturating height_residual under a
+    wheel instead of learning real terrain/friction physics — the initial pose
+    must be a non-differentiable function of the terrain snapshot; gradient
+    into height_residual should only flow through the actual contact dynamics
+    of the rollout. Shared by both simulator wrappers; callers apply
+    @torch.no_grad().
+    """
+    return find_init_rob_position(world_config, robot_model, batch_size, device)
+
+
+def _build_world_config(sim, properties: dict) -> WorldConfig:
+    """Build the WorldConfig for one predict_trajectory call from the sim's grid
+    geometry (res/max_coord/side_range/fwd_range) and the predicted properties.
+    """
+    return WorldConfig(
+        z_grid=properties["support"],
+        grid_res=sim.res,
+        max_coord=sim.max_coord,
+        side_range=sim.side_range,
+        fwd_range=sim.fwd_range,
+        k_friction=properties["friction"],
+        # Stiffness is not a predicted property
+        k_stiffness=properties.get("stiffness", 400_000.0),
+    )
+
+
+def _apply_initial_state_override(state, initial_state, device):
+    """Override the terrain-fitted initial pose/velocities from `initial_state`.
+
+    The segmented trajectory loss (utils/trainer.py) relies on this to seed
+    each segment at the GT pose closest to its own start timestamp; skipping
+    it would silently restart every segment at the fitted origin pose.
+    """
+    if initial_state is not None:
+        if "x" in initial_state:
+            state.x = initial_state["x"].to(device)
+        if "q" in initial_state:
+            state.q = initial_state["q"].to(device)
+        if "xd" in initial_state:
+            state.xd = initial_state["xd"].to(device)
+        if "omega" in initial_state:
+            state.omega = initial_state["omega"].to(device)
+        if "wheel_omega" in initial_state:
+            state.wheel_omega = initial_state["wheel_omega"].to(device)
+    return state
 
 
 class Simulator(torch.nn.Module):
     def __init__(
         self,
         robot="helhest",
-        batch_size=1,
         device=None,
         T_horizon=1.0,
         dt=2e-3,  # see PhysicsEngineConfig.dt / scripts/analysis/sweep_dt.py
@@ -41,8 +108,7 @@ class Simulator(torch.nn.Module):
         self.side_range = None
         self.fwd_range = None
 
-        self.batch_size = batch_size
-        self.T_horizon = torch.tensor(T_horizon)
+        self.T_horizon = T_horizon
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
@@ -55,14 +121,9 @@ class Simulator(torch.nn.Module):
         self, res=None, max_coord=None, side_range=None, fwd_range=None
     ):
         """Update the world configuration parameters."""
-        if res is not None:
-            self.res = res
-        if max_coord is not None:
-            self.max_coord = max_coord
-        if side_range is not None:
-            self.side_range = side_range
-        if fwd_range is not None:
-            self.fwd_range = fwd_range
+        _update_world_config(
+            self, res=res, max_coord=max_coord, side_range=side_range, fwd_range=fwd_range
+        )
 
     def _prepare_inputs(self, vel_ctrl, vel_ts, T_horizon=None):
         """
@@ -88,14 +149,15 @@ class Simulator(torch.nn.Module):
         new_ts : torch.Tensor
             Resampled timestamps. Shape (B, SimSteps).
         """
-        dt = self.engine.get_dt()
+        dt = self.engine.config.dt
         device = vel_ctrl.device
         B, S = vel_ts.shape
 
         if T_horizon is None:
             T_horizon = self.T_horizon
-        if type(T_horizon) is float:
-            T_horizon = torch.tensor(T_horizon, device=device)
+        # float32, matching torch's default dtype for a bare torch.tensor(float) --
+        # preserved so num_steps rounds the same way it always has.
+        T_horizon = torch.tensor(T_horizon, device=device)
 
         # 1. Define target timeline
         # Create target timestamps: [t_start, t_start + dt, ..., t_end]
@@ -162,9 +224,7 @@ class Simulator(torch.nn.Module):
         into height_residual should only flow through the actual contact dynamics
         of the rollout.
         """
-        return find_init_rob_position(
-            world_config, self.robot_model, batch_size, self.device
-        )
+        return _fit_plane_pose(self.robot_model, self.device, world_config, batch_size)
 
     @torch.no_grad()
     def raise_to_clearance(
@@ -239,30 +299,11 @@ class Simulator(torch.nn.Module):
         """
         actual_bs = vel_ctrl.shape[0]
 
-        world_config = WorldConfig(
-            z_grid=properties["support"],
-            grid_res=self.res,
-            max_coord=self.max_coord,
-            side_range=self.side_range,
-            fwd_range=self.fwd_range,
-            k_friction=properties["friction"],
-            # Stiffness is not a predicted property
-            k_stiffness=properties.get("stiffness", 400_000.0),
-        )
+        world_config = _build_world_config(self, properties)
         state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
         state.x, state.q = self.fit_plane_pose(world_config, actual_bs)
 
-        if initial_state is not None:
-            if "x" in initial_state:
-                state.x = initial_state["x"].to(self.device)
-            if "q" in initial_state:
-                state.q = initial_state["q"].to(self.device)
-            if "xd" in initial_state:
-                state.xd = initial_state["xd"].to(self.device)
-            if "omega" in initial_state:
-                state.omega = initial_state["omega"].to(self.device)
-            if "wheel_omega" in initial_state:
-                state.wheel_omega = initial_state["wheel_omega"].to(self.device)
+        state = _apply_initial_state_override(state, initial_state, self.device)
 
         state.x = self.raise_to_clearance(state.x, state.q, world_config)
 
@@ -273,7 +314,7 @@ class Simulator(torch.nn.Module):
         d_ts = (vel_ts[:, 1:] - vel_ts[:, :-1]).clamp(min=1e-6).unsqueeze(-1)
         accels = d_vel / d_ts
 
-        dt = self.engine.get_dt()
+        dt = self.engine.config.dt
         num_steps = vel_ts.shape[-1] - 1
 
         # Collect per-step outputs as lists (preserves gradient graph through stack)

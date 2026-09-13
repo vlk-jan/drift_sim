@@ -1,34 +1,10 @@
-from typing import Union
-
 import torch
 import torch.nn.functional as F
 
-from utils.geometry import quat_to_rotmat
-
 __all__ = [
-    "quat_to_rotmat",
-    "unit_quaternion",
     "integrate_quaternion",
     "interpolate_grid",
 ]
-
-
-def unit_quaternion(
-    batch_size: int = 1, device: Union[str, torch.device] = "cpu"
-) -> torch.Tensor:
-    """
-    Returns a unit quaternion tensor of shape (batch_size, 4).
-
-    Parameters:
-    - batch_size: Number of quaternions to generate.
-    - device: Device on which to create the tensor.
-
-    Returns:
-    - Unit quaternion tensor.
-    """
-    q = torch.zeros(batch_size, 4, device=device)
-    q[:, 0] = 1.0
-    return q
 
 
 def integrate_quaternion(

@@ -619,13 +619,9 @@ class WarpStaticEngine:
     def __init__(
         self,
         robot_model_config,
-        batch_size,
-        max_steps,
         device="cuda",
     ):
         self.device = wp.get_device(device)
-        self.batch_size = batch_size
-        self.max_steps = max_steps
 
         r = robot_model_config
         self.mass = float(r.mass)
@@ -646,9 +642,6 @@ class WarpStaticEngine:
     ):
         """control_velocities: (num_steps, B, 3) wheel speeds. Returns (T,B,...)."""
         num_steps = control_velocities.shape[0]
-        if num_steps > self.max_steps:
-            raise ValueError(f"Steps {num_steps} > Max Allocated {self.max_steps}")
-
         B = control_velocities.shape[1]
         stiffness = world_config.k_stiffness
 
