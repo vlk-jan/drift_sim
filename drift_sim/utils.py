@@ -170,9 +170,11 @@ class PhysicsEngineConfig:
             than treating the origin as the CoM. See the field comment below.
         slip_ref_velocity (float): slip speed (m/s) where the tangential force
             reaches ~76% of its Coulomb limit, via tanh(|v_t| / slip_ref). Near
-            rolling a wheel slips at ~0.01-0.3 m/s, so at 1.0 contact is closer to
-            viscous than Coulomb -- the likely reason oracle sweeps want
-            k_friction >= 3. Changing it changes the dynamics.
+            rolling a wheel slips at ~0.01-0.3 m/s, so at the old 1.0 default
+            contact was closer to viscous than Coulomb and the best raw traction
+            was ~12.8 -- outside any sigmoid head's range. Default 0.1 since
+            2026-09-15; see the field comment below. Changing it changes the
+            dynamics, so trajectory metrics are not comparable across values.
     """
 
     # 2e-3 from scripts/analysis/sweep_dt.py: half the steps of 1e-3 with
@@ -182,7 +184,12 @@ class PhysicsEngineConfig:
     torque_limit: float = 5000.0
     damping_alpha: float = 1.0
     ang_damping: float = 0.1
-    slip_ref_velocity: float = 1.0
+    # 0.1, not the historical 1.0: at 1.0 the best global traction is ~12.8 and
+    # the level error (+0.0831 m of endpoint error) swamps the -0.0345 m the
+    # learned field earns from spatial structure. At 0.1 the optimum is ~1.6, the
+    # level error falls to +0.0018 m and the field captures 77% of the per-window
+    # oracle headroom. scripts/analysis/probe_traction_degeneracy.py, 2026-09-15.
+    slip_ref_velocity: float = 0.1
     # state.x is the body origin (front axle), not the CoM. Off (as every
     # checkpoint was trained) drops the alpha x r and omega x (omega x r) terms,
     # |r| = 0.255 m on helhest; metrics are not comparable across values.
