@@ -148,11 +148,64 @@ def helhest_robot_model() -> "RobotModelConfig":
     )
 
 
+def helhest_v2_robot_model() -> "RobotModelConfig":
+    """Return HELHEST on the v2 rig (Odin1 + Fixposition), measured 2026-09-29.
+
+    Identical to helhest_robot_model() except the wheel RADIUS, which is 0.334
+    and not the URDF's 0.36. Only the radius moves, deliberately: it is the one
+    number that was measured, and changing mass or inertia alongside it would
+    make any v1-vs-v2 difference unattributable.
+
+    WHEEL CENTRES are the URDF's and are trusted: `/robot_description` is a
+    latched topic in every v2 bag, and the 26-09-14, 26-09-22 and 26-09-28 bags
+    all give left (0, +0.36, 0), right (0, -0.36, 0), rear (-0.697, 0, 0).
+
+    THE RADIUS IS NOT. The URDF says 0.36, but git history (helhest-common,
+    inside subtdata:/data/helhest/helhest-jr-workspaces.tar.gz) shows
+    `wheel_radius` was set to 0.36 on 2025-04-02 in commit 04daac0 and never
+    edited again -- 18 months before this rig existed. It is inherited, not
+    measured, and the user confirmed 2026-09-25 that the current wheels differ.
+
+    0.334 is metres of ground per radian of `/joint_states` wheel rate, from two
+    independent measurements on HELHEST_v2_0 agreeing to 0.5%: GT speed over
+    wheel rate (0.336, dataset-tools-63) and total path over integrated rotation
+    (0.334 on the made-surface scenes, 0.3268 pooled over all 12). Slip only
+    inflates integrated rotation, so the made-surface scenes are the estimate and
+    every figure is a lower bound. The URDF's 0.36 over-predicts the driven path
+    by 10% -- 5396 m against 4899 m actual.
+
+    Caveat kept in view: this is the constant that maps a REPORTED joint rate to
+    ground travel, which is exactly what the rollout needs, since the trajectory
+    loss drives the simulator from `joint_states` and scores it against GT. It is
+    the PHYSICAL radius only if `/joint_states` is wheel-side; the rate reaches it
+    from the ODrive controllers via the ESP and no one has ruled out a gear or
+    encoder scale. The physical radius is separately indicated near 0.317 by the
+    lidar ground plane on the flat plaza.
+    """
+    base = helhest_robot_model()
+    return RobotModelConfig(
+        mass=base.mass,
+        cog=base.cog,
+        wheel_radii=torch.tensor([0.334, 0.334, 0.334]),
+        wheel_centers=base.wheel_centers,
+        inertia_tensor=base.inertia_tensor,
+    )
+
+
+ROBOT_MODELS = {
+    "helhest": helhest_robot_model,
+    "helhest_v2": helhest_v2_robot_model,
+}
+
+
 def robot_model_config(robot: str = "helhest") -> "RobotModelConfig":
     """Return wheel geometry, mass and inertia of a supported robot."""
-    if robot != "helhest":
-        raise ValueError(f"Unsupported robot: {robot!r} (have ['helhest'])")
-    return helhest_robot_model()
+    try:
+        return ROBOT_MODELS[robot]()
+    except KeyError:
+        raise ValueError(
+            f"Unsupported robot: {robot!r} (have {sorted(ROBOT_MODELS)})"
+        ) from None
 
 
 @dataclass
