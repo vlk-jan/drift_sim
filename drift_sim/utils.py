@@ -144,10 +144,14 @@ def helhest_robot_model() -> "RobotModelConfig":
     (2026-01-13) with no source recorded. The URDF's own links sum to 67.0 kg
     with the centre of mass 0.171 m behind the front axle and inertia
     diag ~(3.38, 4.04, 7.17); this model carries 93.8 kg, 0.255 m and
-    ~(8.65, 10.64, 19.29) -- 1.4x the mass and 2.6x the inertia. Which is right
-    is open (issue 36 in docs/METHOD.md): the URDF's inertias are exact uniform
-    boxes, so they are a model, not a measurement, and its 2 kg battery and
-    19 kg frame look light for this machine.
+    ~(8.65, 10.64, 19.29) -- 1.4x the mass and 2.6x the inertia.
+
+    THE MASS HERE IS THE RIGHT ONE. The user puts the robot at about 96 kg
+    (stated 2026-09-30), so 93.8 is within 2-3% and the URDF is 30% low --
+    unsurprising, since its inertias are exact uniform boxes and its battery is
+    2 kg. The COG and INERTIA remain unverified (issue 36 in docs/METHOD.md): a
+    weight does not fix either, and inertia enters the transient response the
+    trajectory loss scores.
 
     THE URDF IS STALE IN OTHER RESPECTS, which is the reason not to adopt it
     wholesale: the copy latched in the 2026-09-29 bag still declares an Ouster
