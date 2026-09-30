@@ -62,7 +62,9 @@ class WorldConfig:
 
         # Heightmap gradients along x/y ("xy" indexing: dim 1 is y, dim 2 is x).
         z_grid_grad = torch.stack(
-            torch.gradient(self.z_grid, spacing=self.grid_res, dim=(2, 1), edge_order=2),
+            torch.gradient(
+                self.z_grid, spacing=self.grid_res, dim=(2, 1), edge_order=2
+            ),
             dim=1,
         )  # (B, 2, D, D)
         ones = torch.ones_like(z_grid_grad[:, 0]).unsqueeze(1)
@@ -130,10 +132,28 @@ class RobotModelConfig:
 # Anything needing wheel positions/radii must call robot_model_config() rather
 # than restate numbers; stale copies once put contacts 0.2-0.4 m off the wheels.
 def helhest_robot_model() -> "RobotModelConfig":
-    """Return HELHEST from the robot URDF (/robot_description in every bag).
+    """Return HELHEST's wheel geometry and mass properties.
 
+    WHEEL GEOMETRY IS THE URDF'S (`/robot_description`, latched in every bag).
     base_link is the front axle: front wheels (0, +-0.36), rear (-0.697, 0),
-    radius 0.36; cog is 0.255 m behind the front axle.
+    radius 0.36. Verified 2026-09-30 by reading the published URDF out of both
+    the 2025-09-12 v1 bag and the 2026-09-29 v2 bag: identical in both.
+
+    MASS, COG AND INERTIA ARE NOT THE URDF'S, despite what this docstring
+    claimed until 2026-09-30. They arrived in commit "update robot config"
+    (2026-01-13) with no source recorded. The URDF's own links sum to 67.0 kg
+    with the centre of mass 0.171 m behind the front axle and inertia
+    diag ~(3.38, 4.04, 7.17); this model carries 93.8 kg, 0.255 m and
+    ~(8.65, 10.64, 19.29) -- 1.4x the mass and 2.6x the inertia. Which is right
+    is open (issue 36 in docs/METHOD.md): the URDF's inertias are exact uniform
+    boxes, so they are a model, not a measurement, and its 2 kg battery and
+    19 kg frame look light for this machine.
+
+    THE URDF IS STALE IN OTHER RESPECTS, which is the reason not to adopt it
+    wholesale: the copy latched in the 2026-09-29 bag still declares an Ouster
+    `os_sensor` and four e-CAM cameras, a sensor suite this robot does not
+    carry. Its wheel radius is stale for the same reason -- see
+    helhest_v2_robot_model.
     """
     return RobotModelConfig(
         mass=93.8,
@@ -619,31 +639,129 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
 
 WHEEL_VISUAL_WIDTH = 0.142  # tyre width, visual only -- no dynamics reads it
 
+# THE DRAWN CHASSIS. Visual only: no dynamics reads it, the engine knows the
+# robot as three wheel contacts plus mass/inertia (simulator/engine*.py).
+#
+# These are the machine's envelope, matching dataset_tools' viewer
+# (dataset_tools/viewer/build.py CHASSIS / CHASSIS_CENTER) so the same robot is
+# drawn in both tools. base_link IS the front axle, so a box centred on the body
+# origin is wrong in an obvious way: it hangs half its length out in front of
+# the front wheels. The box is therefore pushed back by CHASSIS_CENTER, which
+# puts it at x in [-0.50, +0.20] -- behind the wheel holders (tf_static
+# -0.477) and up to the front sensor face (+0.10..+0.17).
+#
+# NOT the URDF's base_link box, which is `0.26 0.6 0.18` at xyz `-0.047 0 0`
+# (/robot_description, identical in the 2025-09-12 v1 bag and the 2026-09-29 v2
+# bag). That box is the frame member alone; it leaves out the motors, the
+# battery and the wheel forks, so it draws a machine a quarter the length of
+# the real one. Half-extents here, as SimView wants; the URDF quotes full
+# extents.
+#
+# Until 2026-09-30 this was hx=0.5, hy=0.3, hz=0.15 centred on base_link: a
+# 1.00 x 0.60 x 0.30 m slab reaching 0.5 m ahead of the front axle and stopping
+# 0.2 m short of the rear wheel, which is what made the robot look wrong.
+HELHEST_CHASSIS = {"hx": 0.35, "hy": 0.25, "hz": 0.15}
+HELHEST_CHASSIS_CENTER = (-0.15, 0.0, 0.0)
 
-def add_helhest_visual_wheels(scene, parent: str = "box") -> None:
+
+def chassis_positions(positions, quats):
+    """Offset a base_link path to the drawn chassis box's centre.
+
+    The box is drawn about the body origin it is given, so the body that
+    carries the trajectory rides HELHEST_CHASSIS_CENTER behind base_link,
+    rotated by each pose. add_helhest_visual_wheels undoes the same offset, so
+    the wheels stay on the axles.
+
+    Args:
+        positions: (..., 3) base_link positions, array or tensor. Leading
+                   dimensions are free, so a (T, B, 3) batch works.
+        quats:     (..., 4) orientations as [w, x, y, z], same leading shape.
+    Returns:
+        positions of the box centre, same shape and type as `positions`.
+    """
+    import numpy as np
+
+    was_tensor = isinstance(positions, torch.Tensor)
+    p = positions.detach().cpu().numpy() if was_tensor else np.asarray(positions)
+    q = (
+        quats.detach().cpu().numpy()
+        if isinstance(quats, torch.Tensor)
+        else np.asarray(quats)
+    )
+    shape = p.shape
+    p = p.reshape(-1, 3)
+    q = q.reshape(-1, 4)
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    # Rotate the constant body-frame offset by each pose (quaternion sandwich,
+    # written out to avoid a scipy dependency in the simulator package).
+    ox, oy, oz = HELHEST_CHASSIS_CENTER
+    tx = 2.0 * (y * oz - z * oy)
+    ty = 2.0 * (z * ox - x * oz)
+    tz = 2.0 * (x * oy - y * ox)
+    rot = np.stack(
+        [
+            ox + w * tx + (y * tz - z * ty),
+            oy + w * ty + (z * tx - x * tz),
+            oz + w * tz + (x * ty - y * tx),
+        ],
+        axis=1,
+    )
+    out = (p + rot).reshape(shape)
+    return torch.as_tensor(out, dtype=positions.dtype) if was_tensor else out
+
+
+def chassis_local(points):
+    """Re-express body-frame points for the offset chassis body.
+
+    Contact points handed to SimView are local to the body that carries the
+    trajectory, and that body is the box, not base_link.
+    """
+    import numpy as np
+
+    off = np.asarray(HELHEST_CHASSIS_CENTER)
+    if isinstance(points, torch.Tensor):
+        return points - torch.as_tensor(off, dtype=points.dtype, device=points.device)
+    return np.asarray(points) - off
+
+
+def add_helhest_visual_body(scene, name: str = "box", **kwargs) -> None:
+    """Create the chassis box SimView body at the shared envelope."""
+    from simview import BodyShapeType
+
+    scene.create_body(
+        body_name=name, shape_type=BodyShapeType.BOX, **HELHEST_CHASSIS, **kwargs
+    )
+
+
+def add_helhest_visual_wheels(
+    scene, parent: str = "box", robot: str = "helhest"
+) -> None:
     """Add rigidly attached visual wheels for Helhest to a SimView scene.
 
-    Geometry comes from robot_model_config("helhest") so drawn wheels match the
-    simulated contacts.
+    Geometry comes from robot_model_config(robot) so drawn wheels match the
+    simulated contacts; pass the robot the rollout used, since the v1 and v2
+    models differ by 26 mm of radius. Hubs are expressed relative to the drawn
+    chassis body, which sits HELHEST_CHASSIS_CENTER behind base_link.
     """
     from simview import BodyShapeType, SimViewBody
 
-    model = robot_model_config("helhest")
+    model = robot_model_config(robot)
     centers = model.wheel_centers.tolist()
     radii = model.wheel_radii.tolist()
     # Rows are [+y (left), -y (right), rear]; the quaternion lays the cylinder
     # axis along y, signed by the wheel's side.
     names = ("left_wheel", "right_wheel", "rear_wheel")
-    for name, pos, radius in zip(names, centers, radii):
+    for name_i, pos, radius in zip(names, centers, radii):
         sign = 1.0 if pos[1] < 0 else -1.0
         rot = [0.7071068, sign * 0.7071068, 0.0, 0.0]
+        hub = [p - o for p, o in zip(pos, HELHEST_CHASSIS_CENTER)]
         scene.add_body_object(
             SimViewBody.create(
-                name=name,
+                name=name_i,
                 body_type=BodyShapeType.CYLINDER,
                 radius=float(radius),
                 height=WHEEL_VISUAL_WIDTH,
                 parent=parent,
-                local_transform=list(pos) + rot,
+                local_transform=hub + rot,
             )
         )
