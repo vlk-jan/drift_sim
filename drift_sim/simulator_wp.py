@@ -5,7 +5,6 @@ import torch
 from models.simulator import (
     _apply_initial_state_override,
     _build_world_config,
-    _fit_plane_pose,
     _update_world_config,
 )
 from simulator.engine import DPhysicsEngine
@@ -14,6 +13,7 @@ from simulator.utils import (
     PhysicsEngineConfig,
     PhysicsState,
     WorldConfig,
+    find_init_rob_position,
     raise_to_clearance,
     robot_model_config,
 )
@@ -64,7 +64,9 @@ class Simulator(torch.nn.Module):
     @torch.no_grad()
     def fit_plane_pose(self, world_config: WorldConfig, batch_size: int):
         """Fit the initial pose to the 3-wheel plane; see models/simulator.py."""
-        return _fit_plane_pose(self.robot_model, self.device, world_config, batch_size)
+        return find_init_rob_position(
+            world_config, self.robot_model, batch_size, self.device
+        )
 
     @torch.no_grad()
     def raise_to_clearance(self, x, q, world_config: WorldConfig):
@@ -108,7 +110,7 @@ class Simulator(torch.nn.Module):
 
         actual_bs = vel_ctrl.shape[0]
         state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
-        # Detached on purpose; see models/simulator.py::_fit_plane_pose.
+        # Detached on purpose; see models/simulator.py::Simulator.fit_plane_pose.
         with torch.no_grad():
             state.x, state.q = self.fit_plane_pose(world_config, actual_bs)
 

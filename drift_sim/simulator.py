@@ -28,16 +28,6 @@ def _update_world_config(
         sim.fwd_range = fwd_range
 
 
-def _fit_plane_pose(robot_model, device, world_config: WorldConfig, batch_size: int):
-    """Initial pose from the 3-point (per-wheel) plane fit through the height field.
-
-    Must be detached (callers apply @torch.no_grad()): one bad cell under a wheel
-    swings the fit, and a differentiable fit lets training fix rotation error by
-    saturating height_residual under a wheel instead of through contact dynamics.
-    """
-    return find_init_rob_position(world_config, robot_model, batch_size, device)
-
-
 def _build_world_config(sim, properties: dict) -> WorldConfig:
     """Build a WorldConfig from the sim's grid geometry and predicted properties."""
     return WorldConfig(
@@ -187,9 +177,13 @@ class Simulator(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Initial pose from the 3-point (per-wheel) plane fit through the height field.
 
-        Detached on purpose; see _fit_plane_pose.
+        Must be detached (hence @torch.no_grad()): one bad cell under a wheel
+        swings the fit, and a differentiable fit lets training fix rotation error by
+        saturating height_residual under a wheel instead of through contact dynamics.
         """
-        return _fit_plane_pose(self.robot_model, self.device, world_config, batch_size)
+        return find_init_rob_position(
+            world_config, self.robot_model, batch_size, self.device
+        )
 
     @torch.no_grad()
     def raise_to_clearance(
