@@ -33,6 +33,7 @@ class DPhysicsEngine(torch.nn.Module):
             "_I_body_inv", torch.linalg.inv(robot_model.inertia_tensor.float())
         )
         self.register_buffer("_wheel_centers", robot_model.wheel_centers.float())
+        self.register_buffer("_wheel_radii", robot_model.wheel_radii.float())
         self.register_buffer("_cog", robot_model.cog.float())
         self._mass = robot_model.mass
         F_g = torch.tensor(
@@ -205,10 +206,16 @@ class DPhysicsEngine(torch.nn.Module):
         v_mag = torch.norm(v_tangential, dim=-1, keepdim=True)
         v_dir = v_tangential / (v_mag + 1e-6)
 
-        # F = mu * F_N * tanh(|v_t| / v_ref); v_ref is the slip speed where
-        # traction saturates.
-        v_ref = self.config.slip_ref_velocity
-        F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag / v_ref)
+        # F = mu * F_N * tanh(s / slip_ref_ratio) with the slip ratio
+        # s = |v_t| / max(|omega_w| r_w, slip_floor_velocity): mu is the peak
+        # traction coefficient; a stopped wheel falls back to the velocity form.
+        v_roll = (state.wheel_omega.abs().float() * self._wheel_radii).clamp_min(
+            self.config.slip_floor_velocity
+        )[:, :, None, None]  # (B, W, 1, 1)
+        slip = v_mag / v_roll
+        F_c_mag = (
+            fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(slip / self.config.slip_ref_ratio)
+        )
 
         # Impulse limit: friction may at most stop this point's tangential velocity
         # within one step, with a per-contact momentum share of m / num_contacts.

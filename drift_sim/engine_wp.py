@@ -194,7 +194,8 @@ def accumulate_forces_kernel(
     max_coord: wp.vec2,
     dt: float,
     damping_alpha: float,
-    slip_ref_velocity: float,
+    slip_ref_ratio: float,
+    slip_floor_velocity: float,
     contact_counts: wp.array2d(dtype=float),
     force_acc: wp.array2d(dtype=wp.vec3),
     torque_acc: wp.array2d(dtype=wp.vec3),
@@ -251,8 +252,11 @@ def accumulate_forces_kernel(
     F_N = wp.max(wp.dot(F_spring, n_surf), 0.0)
     # Impulse limit with a per-contact momentum share of mass / count; inert at
     # dt 2e-3 (see simulator/engine.py).
+    # Slip ratio s = |v_t| / max(|omega_w| r_w, floor) (see simulator/engine.py).
+    v_roll = wp.max(wp.abs(controls[step, b][w]) * wheel_radii[w], slip_floor_velocity)
     f_c_mag = wp.min(
-        f_val * F_N * wp.tanh(v_mag / slip_ref_velocity), mass * v_mag / count / dt
+        f_val * F_N * wp.tanh(v_mag / v_roll / slip_ref_ratio),
+        mass * v_mag / count / dt,
     )
 
     F_fric = v_dir * f_c_mag
@@ -365,7 +369,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         num_steps,
         g,
         damping_alpha,
-        slip_ref_velocity,
+        slip_ref_ratio,
+        slip_floor_velocity,
         ang_damping,
         torque_limit,
         com_transfer,
@@ -463,7 +468,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                         mc_wp,
                         dt,
                         damping_alpha,
-                        slip_ref_velocity,
+                        slip_ref_ratio,
+                        slip_floor_velocity,
                         counts,
                     ],
                     outputs=[force_acc, torque_acc],
@@ -568,7 +574,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             None,  # num_steps
             None,  # g
             None,  # damping_alpha
-            None,  # slip_ref_velocity
+            None,  # slip_ref_ratio
+            None,  # slip_floor_velocity
             None,  # ang_damping
             None,  # torque_limit
             None,  # com_transfer
@@ -630,7 +637,8 @@ class WarpStaticEngine:
             num_steps,
             engine_config.g,
             engine_config.damping_alpha,
-            float(engine_config.slip_ref_velocity),
+            float(engine_config.slip_ref_ratio),
+            float(engine_config.slip_floor_velocity),
             engine_config.ang_damping,
             engine_config.torque_limit,
             1.0 if engine_config.com_transfer else 0.0,

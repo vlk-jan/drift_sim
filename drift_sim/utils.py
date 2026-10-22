@@ -248,13 +248,14 @@ class PhysicsEngineConfig:
         ang_damping (float): angular damping coefficient. Default 0.1.
         com_transfer (bool): integrate acceleration onto the body origin rather
             than treating the origin as the CoM. See the field comment below.
-        slip_ref_velocity (float): slip speed (m/s) where the tangential force
-            reaches ~76% of its Coulomb limit, via tanh(|v_t| / slip_ref). Near
-            rolling a wheel slips at ~0.01-0.3 m/s, so at the old 1.0 default
-            contact was closer to viscous than Coulomb and the best raw traction
-            was ~12.8 -- outside any sigmoid head's range. Default 0.1 since
-            2026-09-15; see the field comment below. Changing it changes the
-            dynamics, so trajectory metrics are not comparable across values.
+        slip_ref_ratio (float): slip ratio s = |v_t| / max(|omega_w| r_w,
+            slip_floor_velocity) at which the tangential force reaches ~76% of
+            mu * F_N, via tanh(s / slip_ref_ratio). Default 0.1.
+        slip_floor_velocity (float): floor (m/s) on the rolling speed in the
+            slip-ratio denominator, so a stopped wheel reduces to the old
+            velocity law s = |v_t| / slip_floor_velocity. Default 0.05.
+        Changing either changes the dynamics; trajectory metrics are not
+        comparable across values.
     """
 
     # 2e-3 from scripts/analysis/sweep_dt.py: half the steps of 1e-3 with
@@ -264,12 +265,17 @@ class PhysicsEngineConfig:
     torque_limit: float = 5000.0
     damping_alpha: float = 1.0
     ang_damping: float = 0.1
-    # 0.1, not the historical 1.0: at 1.0 the best global traction is ~12.8 and
-    # the level error (+0.0831 m of endpoint error) swamps the -0.0345 m the
-    # learned field earns from spatial structure. At 0.1 the optimum is ~1.6, the
-    # level error falls to +0.0018 m and the field captures 77% of the per-window
-    # oracle headroom. scripts/analysis/probe_traction_degeneracy.py, 2026-09-15.
-    slip_ref_velocity: float = 0.1
+    # Slip RATIO law (since 2026-10-22): |F_t| = mu F_N tanh(s / slip_ref_ratio),
+    # s = |v_t| / max(|omega_w| r_w, slip_floor_velocity). With the old absolute
+    # slip speed (tanh(|v_t| / 0.1)) only mu / v_ref was identifiable below
+    # saturation and the fitted global optimum sat at ~1.6 against a head ceiling
+    # of 1.0. In slip ratio, mu is the peak traction coefficient: tyres peak at
+    # 10-20 % slip (Pacejka), so 0.1 puts ~76 % of mu at s = 0.1 and saturation
+    # by s ~ 0.3.
+    slip_ref_ratio: float = 0.1
+    # Rolling-speed floor (m/s); a stationary or barely turning wheel uses the
+    # velocity form s = |v_t| / 0.05, which keeps the force finite and smooth.
+    slip_floor_velocity: float = 0.05
     # state.x is the body origin (front axle), not the CoM (|r| = 0.255 m on
     # helhest). On = the correct rigid-body dynamics (alpha x r and
     # omega x (omega x r) terms); checkpoints before 2026-10-22 trained with it off.

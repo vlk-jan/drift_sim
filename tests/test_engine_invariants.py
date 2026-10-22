@@ -122,10 +122,13 @@ def test_impulse_limit_is_inert_at_the_training_dt():
                 F_N = (F_s * n).sum(dim=-1, keepdim=True).clamp_min(1e-9)
                 v_t = v - (v * n).sum(dim=-1, keepdim=True) * n
                 v_mag = v_t.norm(dim=-1, keepdim=True)
+                v_roll = (
+                    state.wheel_omega.abs().float() * engine._wheel_radii
+                ).clamp_min(engine.config.slip_floor_velocity)[:, :, None, None]
                 F_c = (
                     fric.unsqueeze(-1)
                     * F_N
-                    * torch.tanh(v_mag / engine.config.slip_ref_velocity)
+                    * torch.tanh(v_mag / v_roll / engine.config.slip_ref_ratio)
                 )
                 F_lim = engine._mass * v_mag / n_c / dt
                 live = (in_c > 0) & (F_c > 1e-12)
