@@ -175,10 +175,12 @@ def helhest_robot_model() -> "RobotModelConfig":
 def helhest_v2_robot_model() -> "RobotModelConfig":
     """Return HELHEST on the v2 rig (Odin1 + Fixposition), measured 2026-09-29.
 
-    Identical to helhest_robot_model() except the wheel RADIUS, which is 0.334
-    and not the URDF's 0.36. Only the radius moves, deliberately: it is the one
-    number that was measured, and changing mass or inertia alongside it would
-    make any v1-vs-v2 difference unattributable.
+    Differs from helhest_robot_model() in the wheel RADIUS, which is 0.334 and
+    not the URDF's 0.36, and in the MASS: the v2 rig weighs 106 kg (user,
+    2026-10-22; the Odin1 + Fixposition fit is heavier than the Livox rig).
+    Inertia is scaled with the mass (same geometry assumed; where the extra
+    13 kg sits is not measured), cog is kept. Until 2026-10-22 only the radius
+    moved, so arms before that date simulated the v2 rig at 93.8 kg.
 
     WHEEL CENTRES are the URDF's and are trusted: `/robot_description` is a
     latched topic in every v2 bag, and the 26-09-14, 26-09-22 and 26-09-28 bags
@@ -207,12 +209,13 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
     lidar ground plane on the flat plaza.
     """
     base = helhest_robot_model()
+    mass = 106.0
     return RobotModelConfig(
-        mass=base.mass,
+        mass=mass,
         cog=base.cog,
         wheel_radii=torch.tensor([0.334, 0.334, 0.334]),
         wheel_centers=base.wheel_centers,
-        inertia_tensor=base.inertia_tensor,
+        inertia_tensor=base.inertia_tensor * (mass / base.mass),
     )
 
 
