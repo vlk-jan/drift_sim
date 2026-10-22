@@ -69,7 +69,7 @@ class Simulator(torch.nn.Module):
         device=None,
         T_horizon=1.0,
         dt=2e-3,  # see PhysicsEngineConfig.dt / scripts/analysis/sweep_dt.py
-        com_transfer=False,
+        com_transfer=True,
     ):
         """Differentiable torch simulator wrapper.
 

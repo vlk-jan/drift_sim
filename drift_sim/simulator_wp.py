@@ -27,7 +27,7 @@ class Simulator(torch.nn.Module):
         device=None,
         T_horizon=1.0,
         dt=2e-3,
-        com_transfer=False,
+        com_transfer=True,
     ):
         """Warp simulator wrapper; T_horizon must match models/simulator.py."""
         super().__init__()

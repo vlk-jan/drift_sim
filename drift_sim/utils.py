@@ -270,10 +270,10 @@ class PhysicsEngineConfig:
     # level error falls to +0.0018 m and the field captures 77% of the per-window
     # oracle headroom. scripts/analysis/probe_traction_degeneracy.py, 2026-09-15.
     slip_ref_velocity: float = 0.1
-    # state.x is the body origin (front axle), not the CoM. Off (as every
-    # checkpoint was trained) drops the alpha x r and omega x (omega x r) terms,
-    # |r| = 0.255 m on helhest; metrics are not comparable across values.
-    com_transfer: bool = False
+    # state.x is the body origin (front axle), not the CoM (|r| = 0.255 m on
+    # helhest). On = the correct rigid-body dynamics (alpha x r and
+    # omega x (omega x r) terms); checkpoints before 2026-10-22 trained with it off.
+    com_transfer: bool = True
 
 
 # --- Physics classes ---

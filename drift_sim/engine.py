@@ -207,7 +207,7 @@ class DPhysicsEngine(torch.nn.Module):
 
         # F = mu * F_N * tanh(|v_t| / v_ref); v_ref is the slip speed where
         # traction saturates.
-        v_ref = self.config.slip_ref_velocity or 1.0
+        v_ref = self.config.slip_ref_velocity
         F_c_mag = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(v_mag / v_ref)
 
         # Impulse limit: friction may at most stop this point's tangential velocity

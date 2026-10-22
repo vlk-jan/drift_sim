@@ -16,7 +16,7 @@ def _flat_props(mu, k=4e5):
     }
 
 
-def _make_sim(t_horizon, dt=0.002, com_transfer=False):
+def _make_sim(t_horizon, dt=0.002, com_transfer=True):
     return _make_sim_factory(
         t_horizon, dt, com_transfer=com_transfer, max_coord=MAX_COORD
     )
@@ -122,7 +122,11 @@ def test_impulse_limit_is_inert_at_the_training_dt():
                 F_N = (F_s * n).sum(dim=-1, keepdim=True).clamp_min(1e-9)
                 v_t = v - (v * n).sum(dim=-1, keepdim=True) * n
                 v_mag = v_t.norm(dim=-1, keepdim=True)
-                F_c = fric.unsqueeze(-1) * F_N * torch.tanh(v_mag)
+                F_c = (
+                    fric.unsqueeze(-1)
+                    * F_N
+                    * torch.tanh(v_mag / engine.config.slip_ref_velocity)
+                )
                 F_lim = engine._mass * v_mag / n_c / dt
                 live = (in_c > 0) & (F_c > 1e-12)
                 if live.any():
@@ -140,12 +144,13 @@ def test_impulse_limit_is_inert_at_the_training_dt():
     )
 
 
-def test_com_transfer_defaults_off_and_is_live_when_enabled():
-    """com_transfer must default off and change the rollout when enabled.
+def test_com_transfer_defaults_on_and_is_live():
+    """com_transfer must default on (the correct rigid-body dynamics) and
+    change the rollout when toggled.
 
     Without it xdd lands on the body origin, not the CoM; the dropped term is
-    oscillatory (~5.8e-3 m pose error at 2 s) and production checkpoints were
-    trained without it. Catches the flag not reaching the engine.
+    oscillatory (~5.8e-3 m pose error at 2 s). Catches the flag not reaching
+    the engine.
     """
     props = _flat_props(mu=0.6)
     ramp = torch.linspace(-1.0, 1.0, GRID_N)
@@ -153,8 +158,8 @@ def test_com_transfer_defaults_off_and_is_live_when_enabled():
 
     from simulator.utils import PhysicsEngineConfig
 
-    assert PhysicsEngineConfig().com_transfer is False
-    assert _make_sim(0.2).engine.config.com_transfer is False
+    assert PhysicsEngineConfig().com_transfer is True
+    assert _make_sim(0.2).engine.config.com_transfer is True
 
     def final(com_transfer):
         sim = _make_sim(0.2, dt=0.002, com_transfer=com_transfer)
