@@ -93,7 +93,7 @@ class Simulator(torch.nn.Module):
         vel_ts : torch.Tensor
             Absolute Unix timestamps, (B, Steps); each element has its own window.
         initial_state : dict, optional
-            May contain "x", "q", "xd", "omega", "wheel_omega".
+            May contain only "x", "q", "xd", "omega".
 
         Returns:
         -------

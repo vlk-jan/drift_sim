@@ -57,21 +57,19 @@ def test_friction_monotonic_travel():
     )
 
 
-def test_impulse_limit_is_inert_at_the_training_dt():
-    """The friction impulse cap must not bind while driving at dt 2e-3, and must
-    be reachable (it binds at rest).
+def test_impulse_cut_is_inert_while_driving():
+    """The friction cut (DPhysicsEngine._friction) must not bind while driving
+    at dt 2e-3, and must bind at rest, where it is the stabiliser.
 
-    Cap `F_fric <= share * |v_t m_eff / dt + m g_t|` below slip_ref_ratio
-    (simulator/engine.py); it binds at rest by design, so this drives from the
-    drop: straight at 3 rad/s on both rigs, and a helhest_v2 pivot turn whose
-    dragged rear wheel slides past slip_ref_ratio, where the cap must not apply.
+    Drives from the drop: straight at 3 rad/s on both rigs, and a helhest_v2
+    pivot turn whose dragged rear wheel slides under drive torque (a gravity-only
+    cap once clipped it on 998/1000 steps). Checks the engine's own rule.
     """
     from simulator.utils import PhysicsState, WorldConfig
-    from utils.geometry import quat_to_rotmat
 
-    def min_headroom(dt, robot="helhest", omega=(3.0, 3.0, 3.0), settle=0.0):
+    def cut_steps(robot="helhest", omega=(3.0, 3.0, 3.0), t=0.2, dt=2e-3):
         sim = _make_sim_factory(
-            0.2, dt, com_transfer=True, max_coord=MAX_COORD, robot=robot
+            t, dt, com_transfer=True, max_coord=MAX_COORD, robot=robot
         )
         engine = sim.engine
         props = _flat_props(mu=0.6)
@@ -87,84 +85,21 @@ def test_impulse_limit_is_inert_at_the_training_dt():
         state = PhysicsState.dummy(batch_size=1, device="cpu")
         state.x, state.q = sim.fit_plane_pose(world, 1)
         state.x = sim.raise_to_clearance(state.x, state.q, world)
-        worst = float("inf")
+        n = 0
         with torch.no_grad():
-            for i in range(int(0.2 / dt)):
+            for _ in range(int(t / dt)):
                 state.wheel_omega = torch.tensor([omega])
-                R = quat_to_rotmat(state.q)
-                wc = (R @ engine._wheel_centers.T).transpose(
-                    -1, -2
-                ) + state.x.unsqueeze(1)
-                pts = torch.einsum(
-                    "bij,wpj->bwpi", R, engine._wheel_pos_rel
-                ) + wc.unsqueeze(2)
-                dh, n, stif, fric = engine._sample_terrain(pts, world)
-                om = torch.stack(
-                    [
-                        torch.zeros_like(state.wheel_omega),
-                        state.wheel_omega,
-                        torch.zeros_like(state.wheel_omega),
-                    ],
-                    dim=-1,
-                ).float()
-                om_w = (R.unsqueeze(1) @ om.unsqueeze(-1)).squeeze(-1)
-                v = (
-                    state.xd.unsqueeze(1).unsqueeze(1)
-                    + torch.linalg.cross(
-                        state.omega.unsqueeze(1).unsqueeze(1),
-                        pts - state.x.unsqueeze(1).unsqueeze(1),
-                    )
-                    + torch.linalg.cross(om_w.unsqueeze(2), pts - wc.unsqueeze(2))
-                )
-                in_c = (dh < 0).float()
-                F_s = engine._calculate_spring_force(dh, v, n, stif, in_c)
-                F_N = (F_s * n).sum(dim=-1, keepdim=True).clamp_min(1e-9)
-                v_t = v - (v * n).sum(dim=-1, keepdim=True) * n
-                g_t = engine._F_g / engine._mass
-                g_t = g_t - (g_t * n).sum(dim=-1, keepdim=True) * n
-                v_s = v_t + g_t * dt
-                v_mag = v_s.norm(dim=-1, keepdim=True)
-                v_roll = (
-                    state.wheel_omega.abs().float() * engine._wheel_radii
-                ).clamp_min(engine.config.slip_floor_velocity)[:, :, None, None]
-                slip = v_mag / v_roll
-                F_c = (
-                    fric.unsqueeze(-1)
-                    * F_N
-                    * torch.tanh(slip / engine.config.slip_ref_ratio)
-                )
-                r = pts - (state.x + R @ engine._cog)[:, None, None]
-                u = torch.linalg.cross(r, v_s / (v_mag + 1e-6))
-                I_inv = R @ engine._I_body_inv @ R.transpose(-1, -2)
-                inv_m = 1 / engine._mass + (
-                    u * torch.einsum("bij,bwpj->bwpi", I_inv, u)
-                ).sum(-1, keepdim=True)
-                depth = (-dh).clamp_min(0)
-                share = depth / depth.sum(dim=(1, 2), keepdim=True)
-                F_lim = share * (v_t / inv_m / dt + engine._mass * g_t).norm(
-                    dim=-1, keepdim=True
-                )
-                live = (
-                    (in_c > 0) & (F_c > 1e-12) & (slip < engine.config.slip_ref_ratio)
-                )
-                if live.any() and i * dt >= settle:
-                    worst = min(
-                        worst, (F_lim / F_c.clamp_min(1e-12))[live].min().item()
-                    )
-                der = engine.forward(state, torch.zeros(1, 3), world)
-                state = engine.update_state(state, der)
-        return worst
+                c = engine._contact_terms(state, world)
+                n += bool((engine._friction(state, c) < c["F_c"]).any())
+                state = engine.update_state(state, engine.forward(state, world))
+        return n
 
-    assert min_headroom(2e-3) > 2.0, "the impulse cap binds at the training dt"
-    assert min_headroom(2e-3, "helhest_v2") > 2.0, "cap binds driving helhest_v2"
+    assert cut_steps() == 0, "the friction cut binds driving helhest"
+    assert cut_steps("helhest_v2") == 0, "the friction cut binds driving helhest_v2"
     pivot = (0.5 / 0.334, -0.5 / 0.334, 0.0)
-    # The dragged rear wheel binds for ~10 steps passing through the stiff
-    # regime out of rest (the cap's job), then must slide uncapped.
-    assert min_headroom(2e-3, "helhest_v2", pivot, settle=0.05) > 2.0, (
-        "the cap binds in a sustained pivot turn"
-    )
-    assert min_headroom(2e-3, omega=(0.0, 0.0, 0.0)) < 1.0, (
-        "the impulse cap never binds even at rest -- it is dead code"
+    assert cut_steps("helhest_v2", pivot, t=1.0) == 0, "the cut binds in a pivot"
+    assert cut_steps(omega=(0.0, 0.0, 0.0)) > 0, (
+        "the friction cut never binds even at rest -- it is dead code"
     )
 
 

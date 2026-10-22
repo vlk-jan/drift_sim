@@ -64,11 +64,42 @@ def test_straight_drive_speed():
 
 
 def test_pivot_turn_is_not_capped():
-    """The dragged rear wheel slides at slip ratio ~0.8 under drive torque; the
-    impulse cap (gravity only) once clipped it on 998/1000 steps, -0.654 rad."""
-    _, _, R = _rollout(2.0, mu=0.8, omega=[0.5 / 0.334, -0.5 / 0.334, 0.0])
+    """The dragged rear wheel slides under drive torque; the impulse cap (gravity
+    only) once clipped it on 998/1000 steps, -0.654 rad.
+
+    Reference -0.578: the dt -> 0 limit of this rollout, which no cap rule moves
+    (dt 2e-4 and 1e-4 give -0.5780 with the cap always off, gated on slip ratio,
+    or gated on slip reversal); dt 2e-3 adds -0.0005 of Euler error. Gating the
+    cap on slip < 2 slip_ref_ratio gave -0.598 with omega_z chatter (std 3e-3).
+    """
+    _, xd, R = _rollout(2.0, mu=0.8, omega=[0.5 / 0.334, -0.5 / 0.334, 0.0])
     yaw = math.atan2(R[1, 0].item(), R[0, 0].item())
-    assert abs(yaw + 0.578) < 0.01, f"pivot yawed {yaw:.3f} rad, law gives -0.578"
+    assert abs(yaw + 0.578) < 0.003, f"pivot yawed {yaw:.4f} rad, law gives -0.578"
+
+
+@pytest.mark.parametrize("ramp", [0.5, 0.05])
+@pytest.mark.parametrize("turn", [0.0, 0.5])
+def test_braked_robot_settles(ramp, turn):
+    """Drive at 3 rad/s, ramp the wheels to 0: the robot must come to rest.
+
+    With the cap gated on slip < slip_ref_ratio the stopped wheels sat at slip
+    0.1-0.2, where the uncapped law is ~3x too stiff for explicit Euler: the
+    velocity flipped sign every step (late std 8e-3 m/s, ~1.8 mm / 0.5 s).
+    """
+    sim = Simulator(robot="helhest_v2", device="cpu", T_horizon=2.0)
+    sim.update_world_config(
+        res=RES, max_coord=MC, side_range=(-MC, MC), fwd_range=(-MC, MC)
+    )
+    w = [3.0 + turn, 3.0 - turn, 3.0]
+    ctrl = torch.tensor([[w, w, [0.0] * 3, [0.0] * 3]])
+    ts = torch.tensor([[0.0, 0.5, 0.5 + ramp, 2.0]], dtype=torch.float64)
+    props = {"support": torch.zeros(1, N, N), "friction": torch.full((1, N, N), 0.8)}
+    with torch.no_grad():
+        poses, _, xd, om = sim.predict_trajectory(props, ctrl, ts)
+    std = max(xd[0, -100:, :2].std(0).max().item(), om[0, -100:, 2].std().item())
+    drift = (poses[0, -1, :2, 3] - poses[0, -250, :2, 3]).norm().item()
+    assert std < 1e-4, f"late velocity std {std:.2e} -- friction chatters"
+    assert drift < 1e-5, f"stopped robot drifted {drift * 1e3:.4f} mm in 0.5 s"
 
 
 def test_contact_force_is_continuous_when_a_point_touches():
@@ -91,7 +122,7 @@ def test_contact_force_is_continuous_when_a_point_touches():
     def fz(z):
         s = PhysicsState.dummy(batch_size=1, device="cpu")
         s.x, s.q, s.wheel_omega = torch.tensor([[0.0, 0.0, z]]), q, torch.zeros(1, 3)
-        return (eng(s, torch.zeros(1, 3), world).xdd[0, 2].item() + 9.81) * rm.mass
+        return (eng(s, world).xdd[0, 2].item() + 9.81) * rm.mass
 
     # Second-lowest ring point of the front wheels, relative to the origin.
     R = torch.tensor(
@@ -113,3 +144,40 @@ def test_step_count_covers_horizon():
     assert num_sim_steps(1.001, 2e-3) == 501
     assert num_sim_steps(torch.tensor(0.3), 2e-3) == 150  # float32 0.3 is 0.30000001
     assert num_sim_steps(torch.tensor(1.1), 2e-3) == 550
+    with pytest.raises(ValueError):
+        num_sim_steps(0.0, 2e-3)
+
+
+def test_initial_state_rejects_unused_keys():
+    """Wheel speeds are the controls: an initial "wheel_omega" would be ignored."""
+    sim = Simulator(robot="helhest_v2", device="cpu", T_horizon=0.1)
+    sim.update_world_config(
+        res=RES, max_coord=MC, side_range=(-MC, MC), fwd_range=(-MC, MC)
+    )
+    props = {"support": torch.zeros(1, N, N), "friction": torch.full((1, N, N), 0.8)}
+    with pytest.raises(ValueError, match="wheel_omega"):
+        sim.predict_trajectory(
+            props,
+            torch.zeros(1, 2, 3),
+            torch.tensor([[0.0, 0.1]], dtype=torch.float64),
+            initial_state={"wheel_omega": torch.zeros(1, 3)},
+        )
+
+
+def test_float32_epoch_stamps_are_promoted():
+    """float32 Unix stamps (~128 s spacing) must not collapse the window: the
+    wrapper casts to float64 before building the timeline, like the warp one."""
+    sim = Simulator(robot="helhest_v2", device="cpu", T_horizon=0.2)
+    sim.update_world_config(
+        res=RES, max_coord=MC, side_range=(-MC, MC), fwd_range=(-MC, MC)
+    )
+    props = {"support": torch.zeros(1, N, N), "friction": torch.full((1, N, N), 0.8)}
+    # Exactly representable in float32, so both dtypes carry the same stamps.
+    t0 = 1_757_690_112.0
+    ts64 = torch.tensor([[t0, t0 + 256.0]], dtype=torch.float64)
+    ctrl = torch.tensor([[[3.0, 3.0, 3.0], [-3.0, -3.0, -3.0]]])
+    with torch.no_grad():
+        p64, t_64, _, _ = sim.predict_trajectory(props, ctrl, ts64)
+        p32, t_32, _, _ = sim.predict_trajectory(props, ctrl, ts64.float())
+    assert t_32.dtype == torch.float64 and torch.equal(t_32, t_64)
+    assert torch.equal(p32, p64)

@@ -142,7 +142,10 @@ def num_sim_steps(T_horizon, dt) -> int:
     covers the whole horizon, after rounding off float noise (1.0 / 2e-3 is
     500.0000001 or 499.99997 depending on precision; 3 decimals, as a float32
     horizon like tensor(0.3) is off by ~1e-5 steps)."""
-    return math.ceil(round(float(T_horizon) / dt, 3))
+    n = math.ceil(round(float(T_horizon) / dt, 3))
+    if n <= 0:
+        raise ValueError(f"horizon {float(T_horizon)} s gives {n} steps at dt {dt}")
+    return n
 
 
 # --- Robot models: the single source of truth for wheel geometry ---
@@ -380,12 +383,10 @@ class PhysicsStateDer(TensorClass):
     Attributes:
         xdd (torch.Tensor): linear acceleration, (B, 3).
         omega_d (torch.Tensor): angular acceleration, (B, 3).
-        wheel_omega_d (torch.Tensor): wheel angular accelerations, (B, 3).
     """
 
     xdd: torch.Tensor
     omega_d: torch.Tensor
-    wheel_omega_d: torch.Tensor
 
 
 # --- Other functions ---

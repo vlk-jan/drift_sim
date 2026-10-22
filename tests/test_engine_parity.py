@@ -170,6 +170,38 @@ def test_gradients_match_torch(n_steps, dt, robot):
         )
 
 
+def _brake_rollout(engine, robot):
+    """Drive 0.5 s at 3 rad/s with a slight turn, brake to 0 by 0.55 s, hold."""
+    t_horizon = 1.5
+    sim = _make_sim(engine, t_horizon, dt=DT_TRAIN, robot=robot)
+    support = torch.zeros(1, GRID_N, GRID_N, device=DEVICE, requires_grad=True)
+    friction = torch.full((1, GRID_N, GRID_N), 0.8, device=DEVICE, requires_grad=True)
+    ctrl = torch.tensor([[[3.5, 2.5, 3.0]] * 2 + [[0.0] * 3] * 2], device=DEVICE)
+    ctrl_ts = torch.tensor([[0.0, 0.5, 0.55, t_horizon]], device=DEVICE)
+    traj, _, xd, om = sim.predict_trajectory(
+        {"support": support, "friction": friction}, ctrl, ctrl_ts
+    )
+    traj[:, :, :3, 3].pow(2).sum().backward()
+    late = max(
+        xd[0, -100:, :2].std(0).max().item(), om[0, -100:, 2].std().item()
+    )
+    return traj[0, -1, :3, 3].detach(), late, support.grad, friction.grad
+
+
+@pytest.mark.parametrize("robot", ROBOTS)
+def test_brake_to_stop_settles_and_matches_torch(robot):
+    """A braked robot must come to rest in both engines (the friction cut in
+    simulator/engine.py::_friction), with matching pose and gradients."""
+    pos_t, late_t, gs_t, gf_t = _brake_rollout("torch", robot)
+    pos_w, late_w, gs_w, gf_w = _brake_rollout("warp", robot)
+    assert late_t < 1e-4 and late_w < 1e-4, (late_t, late_w)
+    assert (pos_w - pos_t).norm().item() < POS_ATOL, (pos_t.tolist(), pos_w.tolist())
+    for name, gw, gt in (("support", gs_w, gs_t), ("friction", gf_w, gf_t)):
+        assert _cos(gw, gt) > GRAD_COS_MIN, (name, _cos(gw, gt))
+        lo, hi = GRAD_RATIO_RANGE
+        assert lo < _ratio(gw, gt) < hi, (name, _ratio(gw, gt))
+
+
 @pytest.mark.parametrize("engine", ["torch", "warp"])
 def test_batch_elements_are_independent(engine):
     """Element b of a batched rollout must equal that window run on its own.

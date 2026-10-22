@@ -48,8 +48,13 @@ def _apply_initial_state_override(state, initial_state, device):
 
     The segmented trajectory loss (utils/trainer.py) seeds each segment at its
     GT start pose through this; without it every segment restarts at the origin.
+    Unknown keys raise: wheel speeds are the controls, so an initial
+    "wheel_omega" would be silently ignored.
     """
     if initial_state is not None:
+        unused = set(initial_state) - {"x", "q", "xd", "omega"}
+        if unused:
+            raise ValueError(f"initial_state keys not used by the simulator: {unused}")
         if "x" in initial_state:
             state.x = initial_state["x"].to(device)
         if "q" in initial_state:
@@ -58,8 +63,6 @@ def _apply_initial_state_override(state, initial_state, device):
             state.xd = initial_state["xd"].to(device)
         if "omega" in initial_state:
             state.omega = initial_state["omega"].to(device)
-        if "wheel_omega" in initial_state:
-            state.wheel_omega = initial_state["wheel_omega"].to(device)
     return state
 
 
@@ -134,8 +137,9 @@ class Simulator(torch.nn.Module):
 
         if T_horizon is None:
             T_horizon = self.T_horizon
-        # Target timeline [t_start, t_start + dt, ...]. vel_ts must stay float64:
+        # Target timeline [t_start, t_start + dt, ...]. vel_ts must be float64:
         # absolute Unix stamps (~1.76e9 s) have ~128 s float32 spacing.
+        vel_ts = vel_ts.to(torch.float64)
         t_start = vel_ts[:, 0].unsqueeze(1)
         num_steps = num_sim_steps(T_horizon, dt) + 1
         target_ts = t_start + (torch.arange(num_steps, device=device) * dt).unsqueeze(
@@ -217,7 +221,7 @@ class Simulator(torch.nn.Module):
         vel_ts : torch.Tensor
             Control timestamps, (B, Steps).
         initial_state : dict, optional
-            May contain "x" (B, 3), "q" (B, 4, wxyz), "xd", "omega", "wheel_omega";
+            May contain only "x" (B, 3), "q" (B, 4, wxyz), "xd", "omega";
             "x"/"q" override the terrain-fitted pose (e.g. a GT segment start).
         T_horizon : float, optional
             Simulation horizon; defaults to self.T_horizon.
@@ -242,11 +246,6 @@ class Simulator(torch.nn.Module):
 
         vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts, T_horizon=T_horizon)
 
-        # Accelerations, (B, SimSteps-1, 3).
-        d_vel = vel_ctrl[:, 1:] - vel_ctrl[:, :-1]
-        d_ts = (vel_ts[:, 1:] - vel_ts[:, :-1]).clamp(min=1e-6).unsqueeze(-1)
-        accels = d_vel / d_ts
-
         dt = self.engine.config.dt
         num_steps = vel_ts.shape[-1] - 1
 
@@ -261,9 +260,7 @@ class Simulator(torch.nn.Module):
 
         for idx in range(num_steps):
             state.wheel_omega = vel_ctrl[:, idx]
-            curr_acceleration = accels[:, idx]
-
-            dstate = self.engine.forward(state, curr_acceleration, world_config)
+            dstate = self.engine.forward(state, world_config)
             state = self.engine.update_state(state, dstate)
 
             # Poses are post-step states, stamped at the step's end.

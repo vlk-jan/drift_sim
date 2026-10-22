@@ -137,18 +137,16 @@ class DPhysicsEngine(torch.nn.Module):
 
         return F_spring * in_contact / self._wheel_radii.shape[0]
 
-    def forward(
-        self,
-        state: PhysicsState,
-        whl_acc_ctrl: torch.Tensor,
-        world_config: WorldConfig,
-    ) -> PhysicsStateDer:
-        """Compute state time derivatives given the current state and controls."""
-        R = quat_to_rotmat(state.q)
+    def _contact_terms(self, state: PhysicsState, world_config: WorldConfig) -> dict:
+        """Spring and friction terms of every wheel sample point.
 
-        # I_world = R @ I_body @ R.T
+        Returns a dict with the spring force, the friction law ``F_c`` (tanh,
+        uncapped), the impulse limit ``F_lim``, the mask ``capped`` where the cap
+        applies, the applied magnitude ``F_fric``, and the geometry forward needs.
+        Shared by forward and tests/test_engine_invariants.py.
+        """
+        R = quat_to_rotmat(state.q)
         R_T = R.transpose(-1, -2)
-        I_world = R @ self._I_body @ R_T  # (B, 3, 3)
 
         wheel_centers = self._wheel_centers
         wheel_centers_world = (R @ wheel_centers.T).transpose(
@@ -219,49 +217,53 @@ class DPhysicsEngine(torch.nn.Module):
             self.config.slip_floor_velocity
         )[:, :, None, None]  # (B, W, 1, 1)
         slip = v_mag / v_roll
-        F_c_mag = (
-            fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(slip / self.config.slip_ref_ratio)
+        F_c = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(
+            slip / self.config.slip_ref_ratio
         )
 
-        # Impulse limit: friction may at most stop this point's slip within one
-        # step: v_t through the body's effective mass at the point along the slip,
-        # 1 / m_eff = 1 / m + (r x t) . I^-1 (r x t), plus gravity's tangential
-        # pull through the whole mass (held statically by the normal springs),
-        # shared over the contacts by penetration depth (shares sum to 1, so the
-        # joint impulse cannot overshoot; a point touching at zero depth gets zero
-        # share). Inert while moving; at rest it replaces the tanh slope
-        # (mu F_N / 5 mm/s at the rolling floor), which explicit Euler cannot
-        # integrate at dt 2e-3. Pinned by tests/test_engine_invariants.py.
-        # Applied only below slip_ref_ratio: the stiff slope mu F_N / (v_roll
-        # slip_ref_ratio) is tanh's linear regime; past it the law saturates and
-        # the cap (gravity only, blind to drive torque) would bind in sustained
-        # sliding, e.g. a dragged wheel in a pivot turn.
         r_com = R @ self._cog  # body origin -> CoM, world frame (B, 3)
         com_world = state.x + r_com
         r = wheel_points - com_world.unsqueeze(1).unsqueeze(1)  # CoM -> contact
         I_world_inv = R @ self._I_body_inv @ R_T
+        # 1 / m_eff = 1 / m + (r x t) . I^-1 (r x t): the body's effective mass
+        # at the point along the slip.
         u = torch.linalg.cross(r, v_dir)
         inv_m_eff = 1.0 / self._mass + (
             u * torch.einsum("bij,bwpj->bwpi", I_world_inv, u)
         ).sum(dim=-1, keepdim=True)
+        # Penetration-depth shares (sum to 1; zero for a point at zero depth).
         depth = (-dh_points).clamp_min(0)
         share = depth / depth.sum(dim=(1, 2), keepdim=True).clamp_min(1e-12)
-        F_imp_lim = share * torch.norm(
+        F_lim = share * torch.norm(
             v_tangential / inv_m_eff / self.config.dt + self._mass * g_t,
             dim=-1,
             keepdim=True,
         )
 
-        F_c_mag = torch.where(
-            slip < self.config.slip_ref_ratio, torch.min(F_c_mag, F_imp_lim), F_c_mag
-        )
+        return {
+            "R": R,
+            "I_world_inv": I_world_inv,
+            "r_com": r_com,
+            "r": r,
+            "F_springs": F_springs,
+            "v_tangential": v_tangential,
+            # Point velocity relative to the CoM, omega x r + wheel spin.
+            "v_rel": vels_wheel_contact
+            - (state.xd + torch.linalg.cross(state.omega, r_com))[:, None, None],
+            "v_dir": v_dir,
+            "slip": slip,
+            # Friction only where the spring pushes.
+            "F_c": F_c * (norms_spring > 0).float(),
+            "F_lim": F_lim,
+        }
 
-        Fs_fric = F_c_mag * v_dir
-
-        wheels_in_contact = (norms_spring > 0).float()
-        Fs_fric = Fs_fric * wheels_in_contact
-
-        F_net_wheels = F_springs - Fs_fric  # (B, W, P, 3)
+    def _body_accelerations(
+        self, state: PhysicsState, c: dict, F_fric: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """CoM linear and angular acceleration under springs, gravity and the
+        friction magnitudes `F_fric` (B, W, P, 1) along -v_dir."""
+        R, r = c["R"], c["r"]
+        F_net_wheels = c["F_springs"] - F_fric * c["v_dir"]  # (B, W, P, 3)
 
         # Expand gravity to the actual batch size.
         F_grav_batch = self._F_g.expand(R.shape[0], -1)
@@ -269,9 +271,7 @@ class DPhysicsEngine(torch.nn.Module):
 
         xdd_com = F_net_world / self._mass
 
-        torque_per_wheel = torch.linalg.cross(r, F_net_wheels)
-
-        M_net = torque_per_wheel.sum(dim=(1, 2))  # (B, 3)
+        M_net = torch.linalg.cross(r, F_net_wheels).sum(dim=(1, 2))  # (B, 3)
         M_net = M_net - self.config.ang_damping * state.omega
 
         # Clamp the torque magnitude.
@@ -281,10 +281,57 @@ class DPhysicsEngine(torch.nn.Module):
 
         # dot(omega) = inv(I) @ (M - omega x (I @ omega)), with
         # inv(I_world) = R @ inv(I_body) @ R.T (R orthonormal)
+        I_world = R @ self._I_body @ R.transpose(-1, -2)
         Iw = (I_world @ state.omega.unsqueeze(-1)).squeeze(-1)
         w_x_Iw = torch.linalg.cross(state.omega, Iw)
 
-        omega_d = (I_world_inv @ (M_net - w_x_Iw).unsqueeze(-1)).squeeze(-1)
+        omega_d = (c["I_world_inv"] @ (M_net - w_x_Iw).unsqueeze(-1)).squeeze(-1)
+        return xdd_com, omega_d
+
+    def _friction(self, state: PhysicsState, c: dict) -> torch.Tensor:
+        """Applied friction magnitude (B, W, P, 1): the tanh law, cut where it
+        would reverse the slip within one step.
+
+        Coulomb friction can stop a slip but never reverse it. Near rest the law's
+        slope mu F_N / (slip_ref_ratio slip_floor) is ~3x what explicit Euler
+        integrates at dt 2e-3, so uncut it chatters (a stopped robot drifted
+        ~1.8 mm / 0.5 s forever). Predict each point's tangential velocity at the
+        end of the step under ALL forces (springs, gravity, every contact's
+        friction); where it points against the slip, cap the point at the
+        impulse limit F_lim: the force that stops its own slip within the step
+        through its effective mass, 1 / m_eff = 1 / m + (r x t) . I^-1 (r x t),
+        plus gravity's tangential pull through the whole mass, shared over the
+        contacts by penetration depth (shares sum to 1, so the joint impulse
+        cannot overshoot). Sustained sliding under drive torque (the dragged
+        wheel of a pivot turn) does not reverse and follows the law; gating the
+        cap on the slip ratio instead clipped it (always on) or let stopping
+        wheels chatter (slip < slip_ref_ratio).
+        Pinned by tests/test_engine_invariants.py.
+        """
+        F_c = c["F_c"]
+        dt = self.config.dt
+        xdd_com, omega_d = self._body_accelerations(state, c, F_c)
+        # Acceleration of the body-fixed sample point:
+        # a_com + alpha x r + omega x (omega x r + v_spin).
+        r = c["r"]
+        a_pt = (
+            xdd_com[:, None, None]
+            + torch.linalg.cross(omega_d[:, None, None].expand_as(r), r)
+            + torch.linalg.cross(state.omega[:, None, None].expand_as(r), c["v_rel"])
+        )
+        v_end = c["v_tangential"] + a_pt * dt
+        reverses = (v_end * c["v_dir"]).sum(dim=-1, keepdim=True) < 0
+        return torch.where(reverses, torch.min(F_c, c["F_lim"]), F_c)
+
+    def forward(
+        self,
+        state: PhysicsState,
+        world_config: WorldConfig,
+    ) -> PhysicsStateDer:
+        """Compute state time derivatives given the current state."""
+        c = self._contact_terms(state, world_config)
+        r_com = c["r_com"]
+        xdd_com, omega_d = self._body_accelerations(state, c, self._friction(state, c))
 
         # state.x is the body origin (front axle), not the CoM, so
         # a_origin = a_com - alpha x r - omega x (omega x r), r = R @ cog.
@@ -300,13 +347,7 @@ class DPhysicsEngine(torch.nn.Module):
         else:
             xdd = xdd_com
 
-        next_state_der = PhysicsStateDer(
-            xdd=xdd,
-            omega_d=omega_d,
-            wheel_omega_d=whl_acc_ctrl,
-        )
-
-        return next_state_der
+        return PhysicsStateDer(xdd=xdd, omega_d=omega_d)
 
     def update_state(
         self, state: PhysicsState, dstate: PhysicsStateDer
@@ -320,14 +361,14 @@ class DPhysicsEngine(torch.nn.Module):
 
         next_omega = (state.omega + dstate.omega_d * self.config.dt).clamp(-50.0, 50.0)
         next_q = integrate_quaternion(state.q, next_omega, self.config.dt)
-        next_wheel_omega = state.wheel_omega + dstate.wheel_omega_d * self.config.dt
 
         return PhysicsState(
             x=next_x,
             xd=next_xd,
             q=next_q,
             omega=next_omega,
-            wheel_omega=next_wheel_omega,
+            # Wheel speeds are commanded, not integrated (set by the caller).
+            wheel_omega=state.wheel_omega,
             batch_size=actual_bs,
             device=state.device,
         )

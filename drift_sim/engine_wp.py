@@ -176,9 +176,12 @@ def depth_sum_kernel(
         wp.atomic_add(depth_sum, step, b, -dist)
 
 
-@wp.kernel
-def accumulate_forces_kernel(
+@wp.func
+def contact_point(
     step: int,
+    b: int,
+    w: int,
+    i: int,
     state_x: wp.array2d(dtype=wp.vec3),
     state_q: wp.array2d(dtype=wp.quat),
     state_xd: wp.array2d(dtype=wp.vec3),
@@ -201,12 +204,12 @@ def accumulate_forces_kernel(
     slip_ref_ratio: float,
     slip_floor_velocity: float,
     depth_sum: wp.array2d(dtype=float),
-    force_acc: wp.array2d(dtype=wp.vec3),
-    torque_acc: wp.array2d(dtype=wp.vec3),
 ):
-    """Pass 2: spring + friction force and torque of one contact point."""
-    b, w, i = wp.tid()
+    """Spring force, friction law and impulse limit of one sample point.
 
+    Returns (in_contact, F_spring, f_c_mag, v_dir, f_lim, r, v_tangential, v_rel),
+    r = CoM -> point, v_rel = point velocity relative to the CoM.
+    """
     x = state_x[step, b]
     q = state_q[step, b]
     xd = state_xd[step, b]
@@ -226,8 +229,9 @@ def accumulate_forces_kernel(
     n_surf = sample_normal_bilinear(normals_grid, b, u, v, grid_w, grid_h)
 
     dist = (p_world[2] - z_surf) * n_surf[2]
+    zero = wp.vec3(0.0, 0.0, 0.0)
     if dist >= 0.0:
-        return
+        return False, zero, 0.0, zero, 0.0, zero, zero, zero
 
     f_val = sample_grid_bilinear(friction_grid, b, u, v, grid_w, grid_h)
     k_s = sample_grid_bilinear(stiffness_grid, b, u, v, grid_w, grid_h)
@@ -257,29 +261,160 @@ def accumulate_forces_kernel(
     v_dir = v_slip / (v_mag + 1.0e-6)
 
     F_N = wp.max(wp.dot(F_spring, n_surf), 0.0)
+    # Slip ratio s = |v_t| / max(|omega_w| r_w, floor) (see simulator/engine.py).
+    v_roll = wp.max(wp.abs(controls[step, b][w]) * wheel_radii[w], slip_floor_velocity)
+    slip = v_mag / v_roll
+    f_c_mag = f_val * F_N * wp.tanh(slip / slip_ref_ratio)
+    if f_mag <= 1.0e-6:
+        f_c_mag = 0.0
+
     # Impulse limit: stop the slip in one step through the effective mass,
-    # shared by depth (see simulator/engine.py).
-    r_x_t = wp.cross(p_world - com_world, v_dir)
+    # shared by depth (see simulator/engine.py::_friction).
+    r = p_world - com_world
+    r_x_t = wp.cross(r, v_dir)
     inv_m_eff = 1.0 / mass + wp.dot(
         r_x_t, wp.quat_rotate(q, inertia_body_inv * wp.quat_rotate_inv(q, r_x_t))
     )
     share = -dist / wp.max(depth_sum[step, b], 1.0e-12)
     c_stop = v_tangential / inv_m_eff / dt + mass * g_t
-    # Slip ratio s = |v_t| / max(|omega_w| r_w, floor) (see simulator/engine.py).
-    v_roll = wp.max(wp.abs(controls[step, b][w]) * wheel_radii[w], slip_floor_velocity)
-    slip = v_mag / v_roll
-    f_c_mag = f_val * F_N * wp.tanh(slip / slip_ref_ratio)
-    # Cap only in tanh's linear (stiff) regime (see simulator/engine.py).
-    if slip < slip_ref_ratio:
-        f_c_mag = wp.min(f_c_mag, share * wp.sqrt(wp.dot(c_stop, c_stop) + 1.0e-12))
+    f_lim = share * wp.sqrt(wp.dot(c_stop, c_stop) + 1.0e-12)
 
-    F_fric = v_dir * f_c_mag
-    if f_mag <= 1.0e-6:
-        F_fric = wp.vec3(0.0, 0.0, 0.0)
+    v_rel = v_total - (xd + wp.cross(omega, com_world - x))
+    return True, F_spring, f_c_mag, v_dir, f_lim, r, v_tangential, v_rel
 
-    F_point = F_spring - F_fric
+
+@wp.func
+def body_accelerations(
+    q: wp.quat,
+    omega: wp.vec3,
+    force_contacts: wp.vec3,
+    torque_contacts: wp.vec3,
+    inertia_body: wp.mat33,
+    inertia_body_inv: wp.mat33,
+    mass: float,
+    gravity: float,
+    ang_damping: float,
+    torque_limit: float,
+):
+    """CoM linear and angular acceleration under the contact wrench + gravity."""
+    rot_m = wp.quat_to_matrix(q)
+    I_world = rot_m * inertia_body * wp.transpose(rot_m)
+    # Closed form instead of wp.inverse(I_world): cheaper, and the adjoint never
+    # differentiates a matrix inversion.
+    I_inv_world = rot_m * inertia_body_inv * wp.transpose(rot_m)
+
+    F_total = force_contacts + wp.vec3(0.0, 0.0, -mass * gravity)
+
+    T_total = torque_contacts - ang_damping * omega
+    t_mag = wp.sqrt(wp.dot(T_total, T_total) + 1.0e-12)
+    T_total = T_total * wp.min(torque_limit / (t_mag + 1.0e-6), 1.0)
+
+    omega_d = I_inv_world * (T_total - wp.cross(omega, I_world * omega))
+    return F_total / mass, omega_d
+
+
+@wp.kernel
+def accumulate_forces_kernel(
+    step: int,
+    state_x: wp.array2d(dtype=wp.vec3),
+    state_q: wp.array2d(dtype=wp.quat),
+    state_xd: wp.array2d(dtype=wp.vec3),
+    state_omega: wp.array2d(dtype=wp.vec3),
+    controls: wp.array2d(dtype=wp.vec3),
+    wheel_centers: wp.array(dtype=wp.vec3),
+    wheel_radii: wp.array(dtype=float),
+    cog: wp.vec3,
+    mass: float,
+    inertia_body_inv: wp.mat33,
+    gravity: float,
+    z_grid: wp.array3d(dtype=float),
+    normals_grid: wp.array3d(dtype=wp.vec3),
+    friction_grid: wp.array3d(dtype=float),
+    stiffness_grid: wp.array3d(dtype=float),
+    grid_center: wp.vec2,
+    max_coord: wp.vec2,
+    dt: float,
+    damping_alpha: float,
+    slip_ref_ratio: float,
+    slip_floor_velocity: float,
+    depth_sum: wp.array2d(dtype=float),
+    force_acc: wp.array2d(dtype=wp.vec3),
+    torque_acc: wp.array2d(dtype=wp.vec3),
+):
+    """Pass 2: spring + uncut friction-law force and torque of one point."""
+    b, w, i = wp.tid()
+    hit, F_spring, f_c_mag, v_dir, f_lim, r, v_t, v_rel = contact_point(
+        step, b, w, i, state_x, state_q, state_xd, state_omega, controls,
+        wheel_centers, wheel_radii, cog, mass, inertia_body_inv, gravity, z_grid,
+        normals_grid, friction_grid, stiffness_grid, grid_center, max_coord, dt,
+        damping_alpha, slip_ref_ratio, slip_floor_velocity, depth_sum,
+    )  # fmt: skip
+    if not hit:
+        return
+    F_point = F_spring - v_dir * f_c_mag
     wp.atomic_add(force_acc, step, b, F_point)
-    wp.atomic_add(torque_acc, step, b, wp.cross(p_world - com_world, F_point))
+    wp.atomic_add(torque_acc, step, b, wp.cross(r, F_point))
+
+
+@wp.kernel
+def friction_cut_kernel(
+    step: int,
+    state_x: wp.array2d(dtype=wp.vec3),
+    state_q: wp.array2d(dtype=wp.quat),
+    state_xd: wp.array2d(dtype=wp.vec3),
+    state_omega: wp.array2d(dtype=wp.vec3),
+    controls: wp.array2d(dtype=wp.vec3),
+    wheel_centers: wp.array(dtype=wp.vec3),
+    wheel_radii: wp.array(dtype=float),
+    cog: wp.vec3,
+    mass: float,
+    inertia_body: wp.mat33,
+    inertia_body_inv: wp.mat33,
+    gravity: float,
+    z_grid: wp.array3d(dtype=float),
+    normals_grid: wp.array3d(dtype=wp.vec3),
+    friction_grid: wp.array3d(dtype=float),
+    stiffness_grid: wp.array3d(dtype=float),
+    grid_center: wp.vec2,
+    max_coord: wp.vec2,
+    dt: float,
+    damping_alpha: float,
+    slip_ref_ratio: float,
+    slip_floor_velocity: float,
+    ang_damping: float,
+    torque_limit: float,
+    depth_sum: wp.array2d(dtype=float),
+    force_acc: wp.array2d(dtype=wp.vec3),
+    torque_acc: wp.array2d(dtype=wp.vec3),
+    force_cut: wp.array2d(dtype=wp.vec3),
+    torque_cut: wp.array2d(dtype=wp.vec3),
+):
+    """Pass 3: cap friction at the impulse limit where the uncut law would
+    reverse the point's slip by the end of the step (simulator/engine.py
+    ::_friction); the removed friction accumulates as a separate wrench."""
+    b, w, i = wp.tid()
+    hit, F_spring, f_c_mag, v_dir, f_lim, r, v_t, v_rel = contact_point(
+        step, b, w, i, state_x, state_q, state_xd, state_omega, controls,
+        wheel_centers, wheel_radii, cog, mass, inertia_body_inv, gravity, z_grid,
+        normals_grid, friction_grid, stiffness_grid, grid_center, max_coord, dt,
+        damping_alpha, slip_ref_ratio, slip_floor_velocity, depth_sum,
+    )  # fmt: skip
+    if not hit:
+        return
+    if f_c_mag <= f_lim:
+        return
+    omega = state_omega[step, b]
+    acc, omega_d = body_accelerations(
+        state_q[step, b], omega, force_acc[step, b], torque_acc[step, b],
+        inertia_body, inertia_body_inv, mass, gravity, ang_damping, torque_limit,
+    )  # fmt: skip
+    # Acceleration of the body-fixed point: a_com + alpha x r + omega x v_rel.
+    a_pt = acc + wp.cross(omega_d, r) + wp.cross(omega, v_rel)
+    if wp.dot(v_t + a_pt * dt, v_dir) >= 0.0:
+        return
+    F_cut = v_dir * (f_c_mag - f_lim)
+    wp.atomic_add(force_cut, step, b, F_cut)
+    wp.atomic_add(torque_cut, step, b, wp.cross(r, F_cut))
 
 
 @wp.kernel
@@ -300,6 +435,8 @@ def integrate_kernel(
     com_transfer: float,
     force_acc: wp.array2d(dtype=wp.vec3),
     torque_acc: wp.array2d(dtype=wp.vec3),
+    force_cut: wp.array2d(dtype=wp.vec3),
+    torque_cut: wp.array2d(dtype=wp.vec3),
 ):
     """Semi-implicit Euler step: state[step] + accumulated wrench -> state[step+1]."""
     b = wp.tid()
@@ -309,24 +446,15 @@ def integrate_kernel(
     xd = state_xd[step, b]
     omega = state_omega[step, b]
 
-    rot_m = wp.quat_to_matrix(q)
-    I_world = rot_m * inertia_body * wp.transpose(rot_m)
-    # Closed form instead of wp.inverse(I_world): cheaper, and the adjoint never
-    # differentiates a matrix inversion.
-    I_inv_world = rot_m * inertia_body_inv * wp.transpose(rot_m)
-
-    F_total = force_acc[step, b] + wp.vec3(0.0, 0.0, -mass * gravity)
-
-    T_total = torque_acc[step, b] - ang_damping * omega
-    t_mag = wp.sqrt(wp.dot(T_total, T_total) + 1.0e-12)
-    T_total = T_total * wp.min(torque_limit / (t_mag + 1.0e-6), 1.0)
-
-    omega_d = I_inv_world * (T_total - wp.cross(omega, I_world * omega))
+    acc, omega_d = body_accelerations(
+        q, omega, force_acc[step, b] + force_cut[step, b],
+        torque_acc[step, b] + torque_cut[step, b], inertia_body, inertia_body_inv,
+        mass, gravity, ang_damping, torque_limit,
+    )  # fmt: skip
 
     # state.x is the body origin, not the CoM; com_transfer > 0 subtracts
     # alpha x r + omega x (omega x r), r = quat_rotate(q, cog). On by default,
     # as in simulator/engine.py.
-    acc = F_total / mass
     if com_transfer > 0.0:
         r_com = wp.quat_rotate(q, cog)
         acc = acc - wp.cross(omega_d, r_com) - wp.cross(omega, wp.cross(omega, r_com))
@@ -435,6 +563,12 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         torque_acc = wp.zeros(
             (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
         )
+        force_cut = wp.zeros(
+            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
+        )
+        torque_cut = wp.zeros(
+            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
+        )
 
         gc_wp = wp.vec2(float(grid_center_t[0]), float(grid_center_t[1]))
         mc_wp = wp.vec2(float(max_coord_t[0]), float(max_coord_t[1]))
@@ -492,6 +626,42 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                     device=device,
                 )
                 wp.launch(
+                    friction_cut_kernel,
+                    dim=point_dim,
+                    inputs=[
+                        step,
+                        state_x,
+                        state_q,
+                        state_xd,
+                        state_omega,
+                        wp_ctrl,
+                        wheel_centers_wp,
+                        wheel_radii_wp,
+                        cog_wp,
+                        mass,
+                        inertia_wp,
+                        inertia_inv_wp,
+                        g,
+                        wp_z,
+                        wp_n,
+                        wp_kf,
+                        wp_ks,
+                        gc_wp,
+                        mc_wp,
+                        dt,
+                        damping_alpha,
+                        slip_ref_ratio,
+                        slip_floor_velocity,
+                        ang_damping,
+                        torque_limit,
+                        depth_sum,
+                        force_acc,
+                        torque_acc,
+                    ],
+                    outputs=[force_cut, torque_cut],
+                    device=device,
+                )
+                wp.launch(
                     integrate_kernel,
                     dim=B,
                     inputs=[
@@ -511,6 +681,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                         com_transfer,
                         force_acc,
                         torque_acc,
+                        force_cut,
+                        torque_cut,
                     ],
                     device=device,
                 )
