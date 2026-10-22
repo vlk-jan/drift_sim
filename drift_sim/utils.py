@@ -190,11 +190,11 @@ def helhest_robot_model() -> "RobotModelConfig":
     )
 
 
-CONTACT_STIFFNESS_V2 = 142_000.0
+CONTACT_STIFFNESS_V2 = 142_000.0  # N/m, measured tyre sag; see helhest_v2_robot_model
 # Median (height map - wheel-contact z) over driven cells of the paved Stromovka
 # training scenes 0000/0002 (4.3/3.8 cm; held-out 0001: 4.2), measured 2026-10-22
 # after the window-start fix: the lidar ground sits above axle - r on rigid ground.
-HEIGHTMAP_DATUM_OFFSET_V2 = 0.040  # N/m, measured tyre sag; see helhest_v2_robot_model
+HEIGHTMAP_DATUM_OFFSET_V2 = 0.040  # m
 
 
 def helhest_v2_robot_model() -> "RobotModelConfig":
