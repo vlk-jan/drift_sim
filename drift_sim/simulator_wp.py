@@ -14,6 +14,7 @@ from simulator.utils import (
     PhysicsState,
     WorldConfig,
     find_init_rob_position,
+    num_sim_steps,
     raise_to_clearance,
     robot_model_config,
 )
@@ -123,8 +124,7 @@ class Simulator(torch.nn.Module):
 
         sim_dt = self.engine_config.dt
         horizon = self.T_horizon if T_horizon is None else T_horizon
-        # Round, not truncate: 1.0/1e-3 is 999.999... in floating point.
-        num_steps = int(round(horizon / sim_dt))
+        num_steps = num_sim_steps(horizon, sim_dt)
 
         # Build the query timeline per element: windows are far apart in Unix time,
         # and losses match poses by nearest timestamp, so a shared timeline would

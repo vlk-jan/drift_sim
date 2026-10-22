@@ -64,7 +64,8 @@ class DPhysicsEngine(torch.nn.Module):
         """Sample all terrain properties at the wheel points in one grid_sample.
 
         Uses the precomputed 6-channel ``world_config._sample_grid``
-        (z, nx, ny, nz, friction, stiffness).
+        (z, nx, ny, nz, friction, stiffness). Points off the map read the border
+        cell, so a rollout leaving the grid continues on the edge height silently.
 
         Args:
             wheel_points:  (B, W, P, 3) world-frame positions of wheel sample points
@@ -112,12 +113,14 @@ class DPhysicsEngine(torch.nn.Module):
         normals: torch.Tensor,
         stiffness: torch.Tensor,
         in_contact: torch.Tensor,
-        num_contacts: torch.Tensor,
     ) -> torch.Tensor:
         """Compute the damped contact spring force on the wheel points.
 
-        `in_contact` is a hard (dh < 0) step, so the contact boundary is not
-        differentiable.
+        Each penetrating point is a spring of k / n_wheels with damping
+        b / n_wheels, summed: a point entering at zero depth adds zero force, and
+        one point per wheel on flat ground gives the whole-robot k (sag m g / k)
+        and critical heave damping. `in_contact` is a hard (dh < 0) step, so the
+        contact boundary is not differentiable.
         """
         k = stiffness.unsqueeze(-1)  # (B, W, 1, 1)
         b = self.config.damping_alpha * 2 * (self._mass * k) ** 0.5
@@ -132,7 +135,7 @@ class DPhysicsEngine(torch.nn.Module):
 
         F_spring = F_spring_mag * normals
 
-        return F_spring * in_contact / num_contacts
+        return F_spring * in_contact / self._wheel_radii.shape[0]
 
     def forward(
         self,
@@ -181,7 +184,6 @@ class DPhysicsEngine(torch.nn.Module):
 
         # Hard contact gate, shared by the spring force and the impulse limit.
         in_contact = (dh_points < 0).float()  # (B, W, P, 1)
-        num_contacts = in_contact.sum(dim=(1, 2), keepdim=True).clamp_min(1)
 
         # (B, W, P, 3)
         F_springs = self._calculate_spring_force(
@@ -190,7 +192,6 @@ class DPhysicsEngine(torch.nn.Module):
             normals,
             stif_coeffs,
             in_contact,
-            num_contacts,
         )
 
         # Normal force magnitude.
@@ -203,8 +204,13 @@ class DPhysicsEngine(torch.nn.Module):
             dim=-1, keepdim=True
         ) * normals
         v_tangential = vels_wheel_contact - v_normal_comp  # (B, W, P, 3)
-        v_mag = torch.norm(v_tangential, dim=-1, keepdim=True)
-        v_dir = v_tangential / (v_mag + 1e-6)
+        # Friction acts on the slip at the end of the step under gravity, so a
+        # robot parked on a slope is held instead of creeping by g sin(theta) dt.
+        g_t = self._F_g / self._mass
+        g_t = g_t - (g_t * normals).sum(dim=-1, keepdim=True) * normals
+        v_slip = v_tangential + g_t * self.config.dt
+        v_mag = torch.norm(v_slip, dim=-1, keepdim=True)
+        v_dir = v_slip / (v_mag + 1e-6)
 
         # F = mu * F_N * tanh(s / slip_ref_ratio) with the slip ratio
         # s = |v_t| / max(|omega_w| r_w, slip_floor_velocity): mu is the peak
@@ -217,11 +223,30 @@ class DPhysicsEngine(torch.nn.Module):
             fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(slip / self.config.slip_ref_ratio)
         )
 
-        # Impulse limit: friction may at most stop this point's tangential velocity
-        # within one step, with a per-contact momentum share of m / num_contacts.
-        # Inert at dt 2e-3 (friction is ~2 orders below the cap); pinned by
-        # tests/test_engine_invariants.py::test_impulse_limit_is_inert_at_training_dt.
-        F_imp_lim = self._mass * v_mag / num_contacts / self.config.dt
+        # Impulse limit: friction may at most stop this point's slip within one
+        # step: v_t through the body's effective mass at the point along the slip,
+        # 1 / m_eff = 1 / m + (r x t) . I^-1 (r x t), plus gravity's tangential
+        # pull through the whole mass (held statically by the normal springs),
+        # shared over the contacts by penetration depth (shares sum to 1, so the
+        # joint impulse cannot overshoot; a point touching at zero depth gets zero
+        # share). Inert while moving; at rest it replaces the tanh slope
+        # (mu F_N / 5 mm/s at the rolling floor), which explicit Euler cannot
+        # integrate at dt 2e-3. Pinned by tests/test_engine_invariants.py.
+        r_com = R @ self._cog  # body origin -> CoM, world frame (B, 3)
+        com_world = state.x + r_com
+        r = wheel_points - com_world.unsqueeze(1).unsqueeze(1)  # CoM -> contact
+        I_world_inv = R @ self._I_body_inv @ R_T
+        u = torch.linalg.cross(r, v_dir)
+        inv_m_eff = 1.0 / self._mass + (
+            u * torch.einsum("bij,bwpj->bwpi", I_world_inv, u)
+        ).sum(dim=-1, keepdim=True)
+        depth = (-dh_points).clamp_min(0)
+        share = depth / depth.sum(dim=(1, 2), keepdim=True).clamp_min(1e-12)
+        F_imp_lim = share * torch.norm(
+            v_tangential / inv_m_eff / self.config.dt + self._mass * g_t,
+            dim=-1,
+            keepdim=True,
+        )
 
         F_c_mag = torch.min(F_c_mag, F_imp_lim)
 
@@ -238,11 +263,6 @@ class DPhysicsEngine(torch.nn.Module):
 
         xdd_com = F_net_world / self._mass
 
-        r_com = R @ self._cog  # body origin -> CoM, world frame (B, 3)
-        com_world = state.x + r_com
-
-        r = wheel_points - com_world.unsqueeze(1).unsqueeze(1)  # CoM -> contact
-
         torque_per_wheel = torch.linalg.cross(r, F_net_wheels)
 
         M_net = torque_per_wheel.sum(dim=(1, 2))  # (B, 3)
@@ -258,12 +278,11 @@ class DPhysicsEngine(torch.nn.Module):
         Iw = (I_world @ state.omega.unsqueeze(-1)).squeeze(-1)
         w_x_Iw = torch.linalg.cross(state.omega, Iw)
 
-        I_world_inv = R @ self._I_body_inv @ R_T
         omega_d = (I_world_inv @ (M_net - w_x_Iw).unsqueeze(-1)).squeeze(-1)
 
         # state.x is the body origin (front axle), not the CoM, so
         # a_origin = a_com - alpha x r - omega x (omega x r), r = R @ cog.
-        # Off by default: all production checkpoints were trained without it.
+        # On by default; checkpoints before 2026-10-22 trained without it.
         if self.config.com_transfer:
             xdd = (
                 xdd_com

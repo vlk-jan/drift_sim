@@ -8,6 +8,7 @@ from simulator.utils import (
     PhysicsState,
     WorldConfig,
     find_init_rob_position,
+    num_sim_steps,
     raise_to_clearance,
     robot_model_config,
 )
@@ -133,13 +134,10 @@ class Simulator(torch.nn.Module):
 
         if T_horizon is None:
             T_horizon = self.T_horizon
-        # float32 on purpose: keeps num_steps rounding stable.
-        T_horizon = torch.tensor(T_horizon, device=device)
-
         # Target timeline [t_start, t_start + dt, ...]. vel_ts must stay float64:
         # absolute Unix stamps (~1.76e9 s) have ~128 s float32 spacing.
         t_start = vel_ts[:, 0].unsqueeze(1)
-        num_steps = int(torch.ceil(T_horizon / dt).item()) + 1
+        num_steps = num_sim_steps(T_horizon, dt) + 1
         target_ts = t_start + (torch.arange(num_steps, device=device) * dt).unsqueeze(
             0
         ).expand(B, -1)

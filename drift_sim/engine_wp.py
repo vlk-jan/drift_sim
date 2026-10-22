@@ -58,7 +58,8 @@ def sample_grid_bilinear(
     """Bilinearly sample batch element `b`, replicating the border.
 
     Matches simulator/engine.py's padding_mode="border"; zero padding would put a
-    phantom cliff at the map edge.
+    phantom cliff at the map edge. A rollout leaving the map thus continues on the
+    border height silently.
     """
     u0 = int(wp.floor(u))
     v0 = int(wp.floor(v))
@@ -137,7 +138,7 @@ def integrate_quat(q: wp.quat, omega: wp.vec3, dt: float):
 
 # --- Per-timestep kernels ---
 @wp.kernel
-def count_contacts_kernel(
+def depth_sum_kernel(
     step: int,
     state_x: wp.array2d(dtype=wp.vec3),
     state_q: wp.array2d(dtype=wp.quat),
@@ -147,12 +148,12 @@ def count_contacts_kernel(
     normals_grid: wp.array3d(dtype=wp.vec3),
     grid_center: wp.vec2,
     max_coord: wp.vec2,
-    contact_counts: wp.array2d(dtype=float),
+    depth_sum: wp.array2d(dtype=float),
 ):
-    """Pass 1: count penetrating sample points per robot.
+    """Pass 1: sum the penetration depth over each robot's sample points.
 
-    Forces are divided by this count, so it needs its own launch before force
-    accumulation. Like the torch engine's `(dh < 0).float()`, it has no gradient.
+    The friction impulse limit shares itself over the contacts by depth, so the
+    sum needs its own launch before force accumulation.
     """
     b, w, i = wp.tid()
 
@@ -170,8 +171,9 @@ def count_contacts_kernel(
     z_surf = sample_grid_bilinear(z_grid, b, u, v, grid_w, grid_h)
     n_surf = sample_normal_bilinear(normals_grid, b, u, v, grid_w, grid_h)
 
-    if (p_world[2] - z_surf) * n_surf[2] < 0.0:
-        wp.atomic_add(contact_counts, step, b, 1.0)
+    dist = (p_world[2] - z_surf) * n_surf[2]
+    if dist < 0.0:
+        wp.atomic_add(depth_sum, step, b, -dist)
 
 
 @wp.kernel
@@ -186,6 +188,8 @@ def accumulate_forces_kernel(
     wheel_radii: wp.array(dtype=float),
     cog: wp.vec3,
     mass: float,
+    inertia_body_inv: wp.mat33,
+    gravity: float,
     z_grid: wp.array3d(dtype=float),
     normals_grid: wp.array3d(dtype=wp.vec3),
     friction_grid: wp.array3d(dtype=float),
@@ -196,7 +200,7 @@ def accumulate_forces_kernel(
     damping_alpha: float,
     slip_ref_ratio: float,
     slip_floor_velocity: float,
-    contact_counts: wp.array2d(dtype=float),
+    depth_sum: wp.array2d(dtype=float),
     force_acc: wp.array2d(dtype=wp.vec3),
     torque_acc: wp.array2d(dtype=wp.vec3),
 ):
@@ -228,7 +232,6 @@ def accumulate_forces_kernel(
     f_val = sample_grid_bilinear(friction_grid, b, u, v, grid_w, grid_h)
     k_s = sample_grid_bilinear(stiffness_grid, b, u, v, grid_w, grid_h)
 
-    count = wp.max(contact_counts[step, b], 1.0)
     com_world = x + wp.quat_rotate(q, cog)
 
     # Contact-point velocity: body motion + wheel spin about the wheel's own axis.
@@ -241,22 +244,32 @@ def accumulate_forces_kernel(
     vn = wp.dot(v_total, n_surf)
 
     b_damp = damping_alpha * 2.0 * wp.sqrt(mass) * wp.sqrt(k_s)
-    f_mag = wp.max(-k_s * dist - b_damp * vn, 0.0) / count
+    # Per-point spring k / n_wheels, summed (see simulator/engine.py).
+    f_mag = wp.max(-k_s * dist - b_damp * vn, 0.0) / float(NUM_WHEELS)
     F_spring = n_surf * f_mag
 
     # Friction uses the tangential velocity only (see simulator/engine.py).
     v_tangential = v_total - vn * n_surf
-    v_mag = wp.sqrt(wp.dot(v_tangential, v_tangential) + 1.0e-12)
-    v_dir = v_tangential / (v_mag + 1.0e-6)
+    # Slip at the end of the step under gravity (see simulator/engine.py).
+    g_t = wp.vec3(0.0, 0.0, -gravity) + (gravity * n_surf[2]) * n_surf
+    v_slip = v_tangential + g_t * dt
+    v_mag = wp.sqrt(wp.dot(v_slip, v_slip) + 1.0e-12)
+    v_dir = v_slip / (v_mag + 1.0e-6)
 
     F_N = wp.max(wp.dot(F_spring, n_surf), 0.0)
-    # Impulse limit with a per-contact momentum share of mass / count; inert at
-    # dt 2e-3 (see simulator/engine.py).
+    # Impulse limit: stop the slip in one step through the effective mass,
+    # shared by depth (see simulator/engine.py).
+    r_x_t = wp.cross(p_world - com_world, v_dir)
+    inv_m_eff = 1.0 / mass + wp.dot(
+        r_x_t, wp.quat_rotate(q, inertia_body_inv * wp.quat_rotate_inv(q, r_x_t))
+    )
+    share = -dist / wp.max(depth_sum[step, b], 1.0e-12)
+    c_stop = v_tangential / inv_m_eff / dt + mass * g_t
     # Slip ratio s = |v_t| / max(|omega_w| r_w, floor) (see simulator/engine.py).
     v_roll = wp.max(wp.abs(controls[step, b][w]) * wheel_radii[w], slip_floor_velocity)
     f_c_mag = wp.min(
         f_val * F_N * wp.tanh(v_mag / v_roll / slip_ref_ratio),
-        mass * v_mag / count / dt,
+        share * wp.sqrt(wp.dot(c_stop, c_stop) + 1.0e-12),
     )
 
     F_fric = v_dir * f_c_mag
@@ -310,7 +323,7 @@ def integrate_kernel(
     omega_d = I_inv_world * (T_total - wp.cross(omega, I_world * omega))
 
     # state.x is the body origin, not the CoM; com_transfer > 0 subtracts
-    # alpha x r + omega x (omega x r), r = quat_rotate(q, cog). Off by default,
+    # alpha x r + omega x (omega x r), r = quat_rotate(q, cog). On by default,
     # as in simulator/engine.py.
     acc = F_total / mass
     if com_transfer > 0.0:
@@ -412,7 +425,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
         # Per-step accumulators too: a reused buffer needs a zeroing pass the tape
         # cannot differentiate.
-        counts = wp.zeros(
+        depth_sum = wp.zeros(
             (num_steps, B), dtype=float, device=device, requires_grad=True
         )
         force_acc = wp.zeros(
@@ -430,7 +443,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         with ctx.tape:
             for step in range(num_steps):
                 wp.launch(
-                    count_contacts_kernel,
+                    depth_sum_kernel,
                     dim=point_dim,
                     inputs=[
                         step,
@@ -443,7 +456,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                         gc_wp,
                         mc_wp,
                     ],
-                    outputs=[counts],
+                    outputs=[depth_sum],
                     device=device,
                 )
                 wp.launch(
@@ -460,6 +473,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                         wheel_radii_wp,
                         cog_wp,
                         mass,
+                        inertia_inv_wp,
+                        g,
                         wp_z,
                         wp_n,
                         wp_kf,
@@ -470,7 +485,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                         damping_alpha,
                         slip_ref_ratio,
                         slip_floor_velocity,
-                        counts,
+                        depth_sum,
                     ],
                     outputs=[force_acc, torque_acc],
                     device=device,

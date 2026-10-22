@@ -13,12 +13,9 @@ import pytest
 import torch
 from _helpers import make_sim as _make_sim_factory
 
-# Only warp rollouts need a GPU; the static dynamic-loop guard must run locally.
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="the warp engine is CUDA-only"
-)
-
-DEVICE = "cuda"
+# Warp has a CPU device too: the suite runs on CUDA when present, else on CPU.
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+ROBOTS = ("helhest", "helhest_v2")
 GRID_N = 128
 RES = 0.1
 MAX_COORD = 6.4
@@ -46,10 +43,10 @@ GRAD_RATIO_RANGE_BATCHED = (0.9, 1.1)
 SAME_RUN_ATOL = 1e-4
 
 
-def _make_sim(engine, t_horizon, batch_size=1, dt=DT):
+def _make_sim(engine, t_horizon, batch_size=1, dt=DT, robot="helhest"):
     return _make_sim_factory(
         t_horizon, dt, engine=engine, device=DEVICE, max_coord=MAX_COORD,
-        eval_mode=False,
+        eval_mode=False, robot=robot,
     )
 
 
@@ -91,13 +88,14 @@ def _rollout(
     distinct_batch=False,
     dt=DT,
     flat=False,
+    robot="helhest",
 ):
     """Run one rollout and backprop a trajectory loss.
 
     Returns (final_pos_per_batch, grad_support, grad_friction).
     """
     t_horizon = n_steps * dt
-    sim = _make_sim(engine, t_horizon, batch_size, dt)
+    sim = _make_sim(engine, t_horizon, batch_size, dt, robot)
     support, friction, ctrl, ctrl_ts = _make_inputs(
         t_horizon, batch_size, distinct_batch=distinct_batch, dt=dt
     )
@@ -127,12 +125,12 @@ def _ratio(a, b):
 # --- Forward parity ---
 
 
-@requires_cuda
+@pytest.mark.parametrize("robot", ROBOTS)
 @pytest.mark.parametrize("dt", DTS)
 @pytest.mark.parametrize("n_steps", [50, 250, 1000])
-def test_forward_pose_matches_torch(n_steps, dt):
-    pos_t, _, _ = _rollout("torch", n_steps, dt=dt)
-    pos_w, _, _ = _rollout("warp", n_steps, dt=dt)
+def test_forward_pose_matches_torch(n_steps, dt, robot):
+    pos_t, _, _ = _rollout("torch", n_steps, dt=dt, robot=robot)
+    pos_w, _, _ = _rollout("warp", n_steps, dt=dt, robot=robot)
     err = (pos_w - pos_t).norm().item()
     assert err < POS_ATOL, (
         f"warp/torch final pose diverged by {err:.3e} m over {n_steps} steps "
@@ -145,12 +143,12 @@ def test_forward_pose_matches_torch(n_steps, dt):
 
 # The dynamic-loop adjoint first broke at 100 steps and went NaN at 1000, the
 # training length; both must stay covered.
-@requires_cuda
+@pytest.mark.parametrize("robot", ROBOTS)
 @pytest.mark.parametrize("dt", DTS)
 @pytest.mark.parametrize("n_steps", [50, 100, 250, 1000])
-def test_gradients_match_torch(n_steps, dt):
-    _, gs_t, gf_t = _rollout("torch", n_steps, dt=dt)
-    _, gs_w, gf_w = _rollout("warp", n_steps, dt=dt)
+def test_gradients_match_torch(n_steps, dt, robot):
+    _, gs_t, gf_t = _rollout("torch", n_steps, dt=dt, robot=robot)
+    _, gs_w, gf_w = _rollout("warp", n_steps, dt=dt, robot=robot)
 
     assert torch.isfinite(gs_w).all(), (
         f"warp support grad is non-finite at {n_steps} steps, dt={dt:g}"
@@ -172,7 +170,6 @@ def test_gradients_match_torch(n_steps, dt):
         )
 
 
-@requires_cuda
 @pytest.mark.parametrize("engine", ["torch", "warp"])
 def test_batch_elements_are_independent(engine):
     """Element b of a batched rollout must equal that window run on its own.
@@ -212,7 +209,6 @@ def test_batch_elements_are_independent(engine):
     assert spread > 1e-3, "batch elements are identical; the test proves nothing"
 
 
-@requires_cuda
 @pytest.mark.parametrize("n_steps", [100, 500])
 def test_gradients_match_torch_batched(n_steps):
     """Gradient parity at B>1 with a different terrain per element.
@@ -236,7 +232,6 @@ def test_gradients_match_torch_batched(n_steps):
         assert lo < ratio < hi, f"{name} gradient magnitude ratio {ratio:.3e}"
 
 
-@requires_cuda
 @pytest.mark.parametrize("engine", ["torch", "warp"])
 def test_initial_pose_override_is_honoured(engine):
     """initial_state x/q must override the terrain-fitted start pose.
@@ -264,7 +259,6 @@ def test_initial_pose_override_is_honoured(engine):
     )
 
 
-@requires_cuda
 @pytest.mark.parametrize("engine", ["torch", "warp"])
 def test_returned_timestamps_survive_epoch_scale_input(engine):
     """Predicted timestamps must resolve a 1 s window sitting at Unix-epoch scale.
@@ -299,9 +293,9 @@ def test_returned_timestamps_survive_epoch_scale_input(engine):
     )
 
 
-@requires_cuda
+@pytest.mark.parametrize("robot", ROBOTS)
 @pytest.mark.parametrize("engine", ["torch", "warp"])
-def test_gradient_matches_finite_differences(engine):
+def test_gradient_matches_finite_differences(engine, robot):
     """Each engine's support gradient must match central finite differences.
 
     Catches both engines agreeing on the same mistake; torch is the parity
@@ -312,7 +306,7 @@ def test_gradient_matches_finite_differences(engine):
     t_horizon = n_steps * DT
     eps = 2e-3
 
-    sim = _make_sim(engine, t_horizon)
+    sim = _make_sim(engine, t_horizon, robot=robot)
     support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon)
 
     traj, _, _, _ = sim.predict_trajectory(
@@ -406,7 +400,6 @@ def _rollout_with_poisoned_cotangent(engine, n_steps=50):
     return support.grad
 
 
-@requires_cuda
 def test_warp_zeroes_non_finite_gradients_but_says_so():
     """The warp adjoint must zero non-finite gradients and warn once.
 
@@ -427,7 +420,6 @@ def test_warp_zeroes_non_finite_gradients_but_says_so():
     assert not [w for w in caught if "non-finite gradient" in str(w.message)]
 
 
-@requires_cuda
 def test_torch_propagates_non_finite_gradients():
     """The torch engine must propagate non-finite gradients (deliberate asymmetry)."""
     g_torch = _rollout_with_poisoned_cotangent("torch")

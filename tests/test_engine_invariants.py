@@ -58,15 +58,11 @@ def test_friction_monotonic_travel():
 
 
 def test_impulse_limit_is_inert_at_the_training_dt():
-    """The friction impulse cap must not bind at dt 2e-3, and must be reachable.
+    """The friction impulse cap must not bind while driving at dt 2e-3, and must
+    be reachable.
 
-    Cap `F_fric <= m*|v_t| / N / dt`; measured headroom F_imp_lim / F_c_raw over
-    a 0.5 s sloped rollout:
-
-        dt 2e-3   min 18.4x   median 79x    0 points binding
-        dt 5e-3   min  6.5x   median 29x    0 points binding
-        dt 1e-2   min  1.4x   median 2.3x   0 points binding
-        dt 2e-2   min 0.64x   median 0.83x  4 points binding
+    Cap `F_fric <= share * |v_t m_eff / dt + m g_t|` (simulator/engine.py);
+    it binds at rest by design, so this drives at 3 rad/s from the drop.
     """
     from simulator.utils import PhysicsState, WorldConfig
     from utils.geometry import quat_to_rotmat
@@ -117,11 +113,13 @@ def test_impulse_limit_is_inert_at_the_training_dt():
                     + torch.linalg.cross(om_w.unsqueeze(2), pts - wc.unsqueeze(2))
                 )
                 in_c = (dh < 0).float()
-                n_c = in_c.sum(dim=(1, 2), keepdim=True).clamp_min(1)
-                F_s = engine._calculate_spring_force(dh, v, n, stif, in_c, n_c)
+                F_s = engine._calculate_spring_force(dh, v, n, stif, in_c)
                 F_N = (F_s * n).sum(dim=-1, keepdim=True).clamp_min(1e-9)
                 v_t = v - (v * n).sum(dim=-1, keepdim=True) * n
-                v_mag = v_t.norm(dim=-1, keepdim=True)
+                g_t = engine._F_g / engine._mass
+                g_t = g_t - (g_t * n).sum(dim=-1, keepdim=True) * n
+                v_s = v_t + g_t * dt
+                v_mag = v_s.norm(dim=-1, keepdim=True)
                 v_roll = (
                     state.wheel_omega.abs().float() * engine._wheel_radii
                 ).clamp_min(engine.config.slip_floor_velocity)[:, :, None, None]
@@ -130,7 +128,17 @@ def test_impulse_limit_is_inert_at_the_training_dt():
                     * F_N
                     * torch.tanh(v_mag / v_roll / engine.config.slip_ref_ratio)
                 )
-                F_lim = engine._mass * v_mag / n_c / dt
+                r = pts - (state.x + R @ engine._cog)[:, None, None]
+                u = torch.linalg.cross(r, v_s / (v_mag + 1e-6))
+                I_inv = R @ engine._I_body_inv @ R.transpose(-1, -2)
+                inv_m = 1 / engine._mass + (
+                    u * torch.einsum("bij,bwpj->bwpi", I_inv, u)
+                ).sum(-1, keepdim=True)
+                depth = (-dh).clamp_min(0)
+                share = depth / depth.sum(dim=(1, 2), keepdim=True)
+                F_lim = share * (v_t / inv_m / dt + engine._mass * g_t).norm(
+                    dim=-1, keepdim=True
+                )
                 live = (in_c > 0) & (F_c > 1e-12)
                 if live.any():
                     worst = min(

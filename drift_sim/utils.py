@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from typing import Tuple, Union
 
@@ -129,8 +130,18 @@ class RobotModelConfig:
     wheel_centers: torch.Tensor
     inertia_tensor: torch.Tensor
     # Whole-robot tyre stiffness (N/m): static sag on flat ground is m*g/k, since
-    # the engine divides each contact's spring force by the contact count.
+    # each penetrating point is a spring of k / n_wheels (one per wheel on flat).
     contact_stiffness: float
+    # Height of the rig's lidar height map above the wheel-contact model on rigid
+    # ground (m): proprio labels add it so rigid ground is hr = 0, as hr_rigid says.
+    heightmap_datum_offset: float
+
+
+def num_sim_steps(T_horizon, dt) -> int:
+    """Physics steps for a horizon, shared by both wrappers: ceil, so the rollout
+    covers the whole horizon, after rounding off float noise (1.0 / 2e-3 is
+    500.0000001 or 499.99997 depending on precision)."""
+    return math.ceil(round(float(T_horizon) / dt, 6))
 
 
 # --- Robot models: the single source of truth for wheel geometry ---
@@ -175,10 +186,15 @@ def helhest_robot_model() -> "RobotModelConfig":
             [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
         ),
         contact_stiffness=400_000.0,  # unmeasured guess; v1 tyres no longer exist
+        heightmap_datum_offset=0.0,  # unmeasured; v1 maps are legacy
     )
 
 
-CONTACT_STIFFNESS_V2 = 142_000.0  # N/m, measured tyre sag; see helhest_v2_robot_model
+CONTACT_STIFFNESS_V2 = 142_000.0
+# Median (height map - wheel-contact z) over driven cells of the paved Stromovka
+# training scenes 0000/0002 (4.3/3.8 cm; held-out 0001: 4.2), measured 2026-10-22
+# after the window-start fix: the lidar ground sits above axle - r on rigid ground.
+HEIGHTMAP_DATUM_OFFSET_V2 = 0.040  # N/m, measured tyre sag; see helhest_v2_robot_model
 
 
 def helhest_v2_robot_model() -> "RobotModelConfig":
@@ -245,6 +261,7 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
         wheel_centers=base.wheel_centers,
         inertia_tensor=base.inertia_tensor * (mass / base.mass),
         contact_stiffness=CONTACT_STIFFNESS_V2,
+        heightmap_datum_offset=HEIGHTMAP_DATUM_OFFSET_V2,
     )
 
 
