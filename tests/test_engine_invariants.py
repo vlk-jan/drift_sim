@@ -59,16 +59,20 @@ def test_friction_monotonic_travel():
 
 def test_impulse_limit_is_inert_at_the_training_dt():
     """The friction impulse cap must not bind while driving at dt 2e-3, and must
-    be reachable.
+    be reachable (it binds at rest).
 
-    Cap `F_fric <= share * |v_t m_eff / dt + m g_t|` (simulator/engine.py);
-    it binds at rest by design, so this drives at 3 rad/s from the drop.
+    Cap `F_fric <= share * |v_t m_eff / dt + m g_t|` below slip_ref_ratio
+    (simulator/engine.py); it binds at rest by design, so this drives from the
+    drop: straight at 3 rad/s on both rigs, and a helhest_v2 pivot turn whose
+    dragged rear wheel slides past slip_ref_ratio, where the cap must not apply.
     """
     from simulator.utils import PhysicsState, WorldConfig
     from utils.geometry import quat_to_rotmat
 
-    def min_headroom(dt):
-        sim = _make_sim(0.2, dt=dt)
+    def min_headroom(dt, robot="helhest", omega=(3.0, 3.0, 3.0), settle=0.0):
+        sim = _make_sim_factory(
+            0.2, dt, com_transfer=True, max_coord=MAX_COORD, robot=robot
+        )
         engine = sim.engine
         props = _flat_props(mu=0.6)
         world = WorldConfig(
@@ -85,8 +89,8 @@ def test_impulse_limit_is_inert_at_the_training_dt():
         state.x = sim.raise_to_clearance(state.x, state.q, world)
         worst = float("inf")
         with torch.no_grad():
-            for _ in range(int(0.2 / dt)):
-                state.wheel_omega = torch.full((1, 3), 3.0)
+            for i in range(int(0.2 / dt)):
+                state.wheel_omega = torch.tensor([omega])
                 R = quat_to_rotmat(state.q)
                 wc = (R @ engine._wheel_centers.T).transpose(
                     -1, -2
@@ -123,10 +127,11 @@ def test_impulse_limit_is_inert_at_the_training_dt():
                 v_roll = (
                     state.wheel_omega.abs().float() * engine._wheel_radii
                 ).clamp_min(engine.config.slip_floor_velocity)[:, :, None, None]
+                slip = v_mag / v_roll
                 F_c = (
                     fric.unsqueeze(-1)
                     * F_N
-                    * torch.tanh(v_mag / v_roll / engine.config.slip_ref_ratio)
+                    * torch.tanh(slip / engine.config.slip_ref_ratio)
                 )
                 r = pts - (state.x + R @ engine._cog)[:, None, None]
                 u = torch.linalg.cross(r, v_s / (v_mag + 1e-6))
@@ -139,8 +144,10 @@ def test_impulse_limit_is_inert_at_the_training_dt():
                 F_lim = share * (v_t / inv_m / dt + engine._mass * g_t).norm(
                     dim=-1, keepdim=True
                 )
-                live = (in_c > 0) & (F_c > 1e-12)
-                if live.any():
+                live = (
+                    (in_c > 0) & (F_c > 1e-12) & (slip < engine.config.slip_ref_ratio)
+                )
+                if live.any() and i * dt >= settle:
                     worst = min(
                         worst, (F_lim / F_c.clamp_min(1e-12))[live].min().item()
                     )
@@ -149,9 +156,15 @@ def test_impulse_limit_is_inert_at_the_training_dt():
         return worst
 
     assert min_headroom(2e-3) > 2.0, "the impulse cap binds at the training dt"
-    assert min_headroom(5e-2) < 1.0, (
-        "the impulse cap never binds even at dt 5e-2 -- it is dead code and the "
-        "measurement in this docstring is stale"
+    assert min_headroom(2e-3, "helhest_v2") > 2.0, "cap binds driving helhest_v2"
+    pivot = (0.5 / 0.334, -0.5 / 0.334, 0.0)
+    # The dragged rear wheel binds for ~10 steps passing through the stiff
+    # regime out of rest (the cap's job), then must slide uncapped.
+    assert min_headroom(2e-3, "helhest_v2", pivot, settle=0.05) > 2.0, (
+        "the cap binds in a sustained pivot turn"
+    )
+    assert min_headroom(2e-3, omega=(0.0, 0.0, 0.0)) < 1.0, (
+        "the impulse cap never binds even at rest -- it is dead code"
     )
 
 

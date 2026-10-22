@@ -140,8 +140,9 @@ class RobotModelConfig:
 def num_sim_steps(T_horizon, dt) -> int:
     """Physics steps for a horizon, shared by both wrappers: ceil, so the rollout
     covers the whole horizon, after rounding off float noise (1.0 / 2e-3 is
-    500.0000001 or 499.99997 depending on precision)."""
-    return math.ceil(round(float(T_horizon) / dt, 6))
+    500.0000001 or 499.99997 depending on precision; 3 decimals, as a float32
+    horizon like tensor(0.3) is off by ~1e-5 steps)."""
+    return math.ceil(round(float(T_horizon) / dt, 3))
 
 
 # --- Robot models: the single source of truth for wheel geometry ---

@@ -267,10 +267,11 @@ def accumulate_forces_kernel(
     c_stop = v_tangential / inv_m_eff / dt + mass * g_t
     # Slip ratio s = |v_t| / max(|omega_w| r_w, floor) (see simulator/engine.py).
     v_roll = wp.max(wp.abs(controls[step, b][w]) * wheel_radii[w], slip_floor_velocity)
-    f_c_mag = wp.min(
-        f_val * F_N * wp.tanh(v_mag / v_roll / slip_ref_ratio),
-        share * wp.sqrt(wp.dot(c_stop, c_stop) + 1.0e-12),
-    )
+    slip = v_mag / v_roll
+    f_c_mag = f_val * F_N * wp.tanh(slip / slip_ref_ratio)
+    # Cap only in tanh's linear (stiff) regime (see simulator/engine.py).
+    if slip < slip_ref_ratio:
+        f_c_mag = wp.min(f_c_mag, share * wp.sqrt(wp.dot(c_stop, c_stop) + 1.0e-12))
 
     F_fric = v_dir * f_c_mag
     if f_mag <= 1.0e-6:

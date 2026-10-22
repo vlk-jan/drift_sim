@@ -232,6 +232,10 @@ class DPhysicsEngine(torch.nn.Module):
         # share). Inert while moving; at rest it replaces the tanh slope
         # (mu F_N / 5 mm/s at the rolling floor), which explicit Euler cannot
         # integrate at dt 2e-3. Pinned by tests/test_engine_invariants.py.
+        # Applied only below slip_ref_ratio: the stiff slope mu F_N / (v_roll
+        # slip_ref_ratio) is tanh's linear regime; past it the law saturates and
+        # the cap (gravity only, blind to drive torque) would bind in sustained
+        # sliding, e.g. a dragged wheel in a pivot turn.
         r_com = R @ self._cog  # body origin -> CoM, world frame (B, 3)
         com_world = state.x + r_com
         r = wheel_points - com_world.unsqueeze(1).unsqueeze(1)  # CoM -> contact
@@ -248,7 +252,9 @@ class DPhysicsEngine(torch.nn.Module):
             keepdim=True,
         )
 
-        F_c_mag = torch.min(F_c_mag, F_imp_lim)
+        F_c_mag = torch.where(
+            slip < self.config.slip_ref_ratio, torch.min(F_c_mag, F_imp_lim), F_c_mag
+        )
 
         Fs_fric = F_c_mag * v_dir
 
