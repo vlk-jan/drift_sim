@@ -37,8 +37,8 @@ def _build_world_config(sim, properties: dict) -> WorldConfig:
         side_range=sim.side_range,
         fwd_range=sim.fwd_range,
         k_friction=properties["friction"],
-        # Stiffness is not a predicted property.
-        k_stiffness=properties.get("stiffness", 400_000.0),
+        # Stiffness is not predicted: it is the robot's tyre constant.
+        k_stiffness=properties.get("stiffness", sim.robot_model.contact_stiffness),
     )
 
 

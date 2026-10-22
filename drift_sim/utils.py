@@ -29,7 +29,9 @@ class WorldConfig:
         ``fwd_range`` the second (y / lateral), consistently with
         ``utils/pcd.py::get_height_map``. Harmless while extents are square and
         zero-centred; pinned by ``tests/test_world_config.py``.
-    k_stiffness (float or torch.Tensor): terrain stiffness, default 400_000 N/m.
+    k_stiffness (float or torch.Tensor): contact stiffness in N/m. A rollout takes
+        the robot's ``contact_stiffness`` (models/simulator.py::_build_world_config);
+        the 400_000 default only serves geometry-only uses (seating, plots).
     k_friction (float or torch.Tensor): terrain friction, default 0.5.
     """
 
@@ -126,6 +128,9 @@ class RobotModelConfig:
     wheel_radii: torch.Tensor
     wheel_centers: torch.Tensor
     inertia_tensor: torch.Tensor
+    # Whole-robot tyre stiffness (N/m): static sag on flat ground is m*g/k, since
+    # the engine divides each contact's spring force by the contact count.
+    contact_stiffness: float
 
 
 # --- Robot models: the single source of truth for wheel geometry ---
@@ -169,7 +174,11 @@ def helhest_robot_model() -> "RobotModelConfig":
         inertia_tensor=torch.tensor(
             [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
         ),
+        contact_stiffness=400_000.0,  # unmeasured guess; v1 tyres no longer exist
     )
+
+
+CONTACT_STIFFNESS_V2 = 142_000.0  # N/m, measured tyre sag; see helhest_v2_robot_model
 
 
 def helhest_v2_robot_model() -> "RobotModelConfig":
@@ -208,6 +217,15 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
     encoder scale. The physical radius is separately indicated near 0.317 by the
     lidar ground plane on the flat plaza.
 
+    STIFFNESS is measured (user, 2026-10-22, robot standing on flat floor vs
+    each wheel just lifted; axle height, cm): left 33.1/33.6, right 32.5/33.5,
+    rear 33.2/33.9 -> mean sag 7.3 mm (5-10 mm, one-hand lift), k = 106 * 9.81
+    / 0.0073 = 1.42e5 N/m (1.0e5-2.1e5). Same probe: xy identical across
+    1.0e5-4e5; |z| 2.93 cm vs 2.70 at the old 4e5 guess.
+    The same numbers confirm the RADIUS as physical: mean free radius 0.337,
+    loaded 0.329, and the rolling radius of a pneumatic tyre r_free - sag/3 =
+    0.334 -- so /joint_states is wheel-side, no gear or encoder scale.
+
     SENSITIVITY (2026-10-22, scripts/analysis/probe_robot_constants.py: rigid GT
     support, constant mu, 512 windows of the made-surface TRAINING scenes
     0000/0002-0006 of HELHEST_v2_4, mean xy error over 0.5-2 s; baseline 3.58 cm):
@@ -226,6 +244,7 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
         wheel_radii=torch.tensor([0.334, 0.334, 0.334]),
         wheel_centers=base.wheel_centers,
         inertia_tensor=base.inertia_tensor * (mass / base.mass),
+        contact_stiffness=CONTACT_STIFFNESS_V2,
     )
 
 
