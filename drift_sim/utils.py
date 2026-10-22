@@ -207,6 +207,16 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
     from the ODrive controllers via the ESP and no one has ruled out a gear or
     encoder scale. The physical radius is separately indicated near 0.317 by the
     lidar ground plane on the flat plaza.
+
+    SENSITIVITY (2026-10-22, scripts/analysis/probe_robot_constants.py: rigid GT
+    support, constant mu, 512 windows of the made-surface TRAINING scenes
+    0000/0002-0006 of HELHEST_v2_4, mean xy error over 0.5-2 s; baseline 3.58 cm):
+    radius is sharp and 0.334 is the optimum (0.325 +0.5 cm, 0.345 +1.3 cm, 0.36
+    +4.3 cm); cog x -0.255 is the optimum (URDF -0.171 +0.1 cm, +-0.1 m +0.5 to
+    +0.9 cm); inertia x0.75-x2 within 0.1 cm (x0.5 +0.4 cm), so the mass-scaled
+    tensor is not the error's limit; k_stiffness 1e5-4e5 N/m within 0.1 cm (worse
+    from 8e5); slip_ref_ratio 0.1-0.2 tie (0.02 +0.2 cm, 0.4 +0.2 cm);
+    slip_floor_velocity 0.01-0.2 m/s has no effect. mu 0.8-1.5 within 0.15 cm.
     """
     base = helhest_robot_model()
     mass = 106.0
