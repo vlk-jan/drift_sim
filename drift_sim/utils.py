@@ -470,7 +470,6 @@ def find_init_rob_position(
     return x, q
 
 
-@torch.no_grad()
 def raise_to_clearance(engine, x, q, world_config):
     """Raise the robot until all wheel circumference sample points clear the terrain.
 
@@ -478,25 +477,21 @@ def raise_to_clearance(engine, x, q, world_config):
     still penetrate and the contact springs launch the robot at t=0. Returns a new
     position (`x` may be a view into GT data).
 
-    Each iteration lifts by the vertical penetration dh, converging geometrically;
-    the exact -dh/nz would over-lift at near-vertical faces (nz ~ 0). 5 iterations
-    leave <3% residual on 60 degree slopes without overshoot. `engine` only
-    supplies geometry, so both simulator wrappers share this.
+    A vertical lift leaves every point's xy, so the exact lift is the largest
+    vertical gap terrain_z - point_z (dh / nz), in one step. Differentiable in
+    the terrain: the start height is a function of the support under the
+    deepest point, and a detached lift made the support gradient disagree with
+    finite differences (cos 0.98 -> 1.000 at 2 s, rough ground, GT-seeded start).
+    The attitude is not differentiated (see Simulator.fit_plane_pose). `engine`
+    only supplies geometry, so both simulator wrappers share this.
     """
-    x = x.clone()
-    batch_size = x.shape[0]
-    R_body = quat_to_rotmat(q)  # (B, 3, 3)
+    R_body = quat_to_rotmat(q.detach())  # (B, 3, 3)
     wp_rel = torch.einsum("bij,wpj->bwpi", R_body, engine._wheel_pos_rel)  # (B,W,P,3)
-
-    # No early exit: it would cost a device->host sync, and max_pen is 0 once
-    # converged.
-    for _ in range(5):
-        wc_world = (R_body @ engine._wheel_centers.T).transpose(-1, -2) + x.unsqueeze(1)
-        wp_world = wp_rel + wc_world.unsqueeze(2)  # (B, W, P, 3)
-        dh, _, _, _ = engine._sample_terrain(wp_world, world_config)  # (B, W, P, 1)
-        max_pen = (-dh.reshape(batch_size, -1)).clamp(min=0).max(dim=1).values  # (B,)
-        x[:, 2] += max_pen
-    return x
+    wc_world = (R_body @ engine._wheel_centers.T).transpose(-1, -2) + x.unsqueeze(1)
+    dh, normals, _, _ = engine._sample_terrain(wp_rel + wc_world.unsqueeze(2), world_config)
+    gap = -dh / normals[..., 2:3].clamp_min(1e-3)  # vertical gap, (B, W, P, 1)
+    lift = gap.flatten(1).max(dim=1).values.clamp_min(0)  # (B,)
+    return x + torch.stack([torch.zeros_like(lift), torch.zeros_like(lift), lift], -1)
 
 
 @torch.no_grad()

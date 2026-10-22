@@ -116,22 +116,26 @@ class DPhysicsEngine(torch.nn.Module):
     ) -> torch.Tensor:
         """Compute the damped contact spring force on the wheel points.
 
-        Each penetrating point is a spring of k / n_wheels with damping
-        b / n_wheels, summed: a point entering at zero depth adds zero force, and
-        one point per wheel on flat ground gives the whole-robot k (sag m g / k)
-        and critical heave damping. `in_contact` is a hard (dh < 0) step, so the
-        contact boundary is not differentiable.
+        Each penetrating point is a spring of k / n_wheels, summed: one point per
+        wheel on flat ground gives the whole-robot k (sag m g / k). Damping is
+        Hunt-Crossley, proportional to depth: F = depth (k - lam v_n), lam =
+        b k / (m g), b = alpha 2 sqrt(m k). At the rest sag depth m g / k it is b
+        (critical heave damping, as before); at zero depth it is zero, as for a
+        real tyre with no deflection. A depth-independent b v_n made the force
+        jump by b |v_n| / n_wheels at every touchdown, which the analytic
+        gradient cannot see: support gradients came out 5-35 % low and, from a
+        seated start on rough ground, pointed the wrong way (cos -0.28 at 0.25 s).
+        The force is now continuous in the terrain, so `in_contact` only masks.
         """
         k = stiffness.unsqueeze(-1)  # (B, W, 1, 1)
         b = self.config.damping_alpha * 2 * (self._mass * k) ** 0.5
+        lam = b * k / (self._mass * self.config.g)
 
         xd_points_n = (xd_points * normals).sum(dim=-1, keepdim=True)
 
-        # F = -k * dh - b * v_n along the normal; relu makes it unilateral (the
-        # ground only pushes).
-        force_magnitude = -(k * dh_points + b * xd_points_n)
-
-        F_spring_mag = torch.relu(force_magnitude)
+        # relu makes it unilateral (the ground only pushes).
+        depth = (-dh_points).clamp_min(0)
+        F_spring_mag = torch.relu(depth * (k - lam * xd_points_n))
 
         F_spring = F_spring_mag * normals
 

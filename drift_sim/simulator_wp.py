@@ -69,7 +69,6 @@ class Simulator(torch.nn.Module):
             world_config, self.robot_model, batch_size, self.device
         )
 
-    @torch.no_grad()
     def raise_to_clearance(self, x, q, world_config: WorldConfig):
         """Lift the robot clear of the terrain. See simulator/utils.py."""
         return raise_to_clearance(self._geom, x, q, world_config)

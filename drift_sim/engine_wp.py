@@ -248,8 +248,10 @@ def contact_point(
     vn = wp.dot(v_total, n_surf)
 
     b_damp = damping_alpha * 2.0 * wp.sqrt(mass) * wp.sqrt(k_s)
+    # Hunt-Crossley damping, zero at zero depth (see simulator/engine.py).
+    lam = b_damp * k_s / (mass * gravity)
     # Per-point spring k / n_wheels, summed (see simulator/engine.py).
-    f_mag = wp.max(-k_s * dist - b_damp * vn, 0.0) / float(NUM_WHEELS)
+    f_mag = wp.max(-dist * (k_s - lam * vn), 0.0) / float(NUM_WHEELS)
     F_spring = n_surf * f_mag
 
     # Friction uses the tangential velocity only (see simulator/engine.py).
@@ -688,6 +690,9 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                 )
 
         ctx.wp_inputs = {"ctrl": wp_ctrl, "z": wp_z, "n": wp_n, "kf": wp_kf}
+        # The seated start height depends on the terrain (simulator/utils.py::
+        # raise_to_clearance), so x0 takes the adjoint left in state_x.grad[0].
+        ctx.init_x_grad = init_x.requires_grad
         ctx.state = (state_x, state_q, state_xd, state_omega)
 
         # Drop the seeded step 0 to match the torch engine, whose first pose is the
@@ -710,7 +715,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             g = g.contiguous()
             if quat:  # WXYZ -> XYZW
                 g = g[..., [1, 2, 3, 0]].contiguous()
-            # Step 0 is the non-differentiable seeded initial state.
+            # Step 0 is the seeded initial state, not an output.
             wp.copy(arr.grad[1:], wp.from_torch(g, dtype=arr.dtype))
 
         seed(state_x, grad_x)
@@ -740,8 +745,11 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                 )
             return torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
 
+        init_x_grad = None
+        if ctx.init_x_grad:
+            init_x_grad = torch.nan_to_num(wp.to_torch(state_x.grad)[0].clone())
         return (
-            None,  # init_x: detached plane fit
+            init_x_grad,  # init_x: through the clearance raise
             None,  # init_q
             None,  # init_xd
             None,  # init_omega

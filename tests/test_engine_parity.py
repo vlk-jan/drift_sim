@@ -41,6 +41,10 @@ GRAD_RATIO_RANGE = (0.95, 1.05)
 GRAD_RATIO_RANGE_BATCHED = (0.9, 1.1)
 # Same-run floor: torch self-vs-self is bit-identical, warp 7.5e-9 m.
 SAME_RUN_ATOL = 1e-4
+# Support gradient vs central finite differences (eps 2e-3 m, 250 x 1e-3 s),
+# worst cell measured 2026-10-23 (both engines, CPU): flat 0.0058, rough 0.028.
+# Rough fails the detached raise (0.071) and the old touchdown damping (0.33).
+FD_REL_TOL = {"flat": 0.02, "rough": 0.06}
 
 
 def _make_sim(engine, t_horizon, batch_size=1, dt=DT, robot="helhest"):
@@ -325,24 +329,45 @@ def test_returned_timestamps_survive_epoch_scale_input(engine):
     )
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
-@pytest.mark.parametrize("engine", ["torch", "warp"])
-def test_gradient_matches_finite_differences(engine, robot):
-    """Each engine's support gradient must match central finite differences.
+def _rough_support():
+    """+-3 cm smooth random terrain (~0.3 m wavelength), fixed seed."""
+    g = torch.Generator().manual_seed(0)
+    k = torch.exp(-torch.arange(-12, 13.0) ** 2 / 18.0)
+    k = k / k.sum()
+    z = torch.randn(1, 1, GRID_N, GRID_N, generator=g)
+    z = torch.nn.functional.conv2d(z, k.view(1, 1, 1, -1), padding=(0, 12))
+    z = torch.nn.functional.conv2d(z, k.view(1, 1, -1, 1), padding=(12, 0))[:, 0]
+    return (0.03 * z / z.abs().max()).to(DEVICE)
 
-    Catches both engines agreeing on the same mistake; torch is the parity
-    reference and nothing else checks it. Cells are picked by largest |gradient|
-    since wheel contacts sit off the grid centre.
+
+def _fd_rel_errors(engine, robot, terrain, eps=2e-3):
+    """Relative error |fd - analytic| / max(|fd|, |analytic|) of the support
+    gradient at the 4 cells of largest |gradient| (wheel contacts sit off the
+    grid centre).
+
+    The start attitude is pinned (the plane fit is detached by design, see
+    Simulator.fit_plane_pose). "flat": the start is 5 mm above the ground, so
+    the robot drops and touches down. "rough": the start pose is 5 mm INTO
+    the terrain, as a GT-seeded training segment often is, so the
+    differentiable clearance raise sets the start height.
     """
+    from models.simulator import _build_world_config
+
     n_steps = 250
     t_horizon = n_steps * DT
-    eps = 2e-3
-
     sim = _make_sim(engine, t_horizon, robot=robot)
     support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon)
+    if terrain == "rough":
+        support = _rough_support().requires_grad_(True)
+    with torch.no_grad():
+        wc = _build_world_config(sim, {"support": support, "friction": friction})
+        x0, q0 = sim.fit_plane_pose(wc, 1)
+        x0 = sim.raise_to_clearance(x0, q0, wc)
+        x0[:, 2] += 5e-3 if terrain == "flat" else -5e-3
+    init = {"x": x0, "q": q0}
 
     traj, _, _, _ = sim.predict_trajectory(
-        {"support": support, "friction": friction}, ctrl, ctrl_ts
+        {"support": support, "friction": friction}, ctrl, ctrl_ts, initial_state=init
     )
     traj[:, :, :3, 3].pow(2).sum().backward()
     grad = support.grad.clone()
@@ -350,15 +375,12 @@ def test_gradient_matches_finite_differences(engine, robot):
 
     def loss_at(z):
         props = {"support": z, "friction": friction.detach()}
-        tr, _, _, _ = sim.predict_trajectory(props, ctrl, ctrl_ts)
+        tr, _, _, _ = sim.predict_trajectory(props, ctrl, ctrl_ts, initial_state=init)
         return tr[:, :, :3, 3].pow(2).sum().item()
 
-    flat = grad[0].abs().flatten()
-    top = torch.topk(flat, 4).indices
-    cells = [(int(k) // GRID_N, int(k) % GRID_N) for k in top]
-
-    checked = 0
-    for i, j in cells:
+    rels = []
+    for k in torch.topk(grad[0].abs().flatten(), 4).indices:
+        i, j = int(k) // GRID_N, int(k) % GRID_N
         analytic = grad[0, i, j].item()
         if abs(analytic) < 1e-6:
             continue  # cell the trajectory never touched; nothing to verify
@@ -367,16 +389,25 @@ def test_gradient_matches_finite_differences(engine, robot):
         zm = support.detach().clone()
         zm[0, i, j] -= eps
         numeric = (loss_at(zp) - loss_at(zm)) / (2 * eps)
-        rel = abs(numeric - analytic) / max(abs(numeric), abs(analytic), 1e-12)
-        # Loose: the hard `dist < 0` contact gate lets a finite perturbation add
-        # or drop contact points the derivative cannot see.
-        assert rel < 0.35, (
-            f"{engine} cell ({i},{j}): analytic={analytic:.6e} "
-            f"finite-diff={numeric:.6e} (rel err {rel:.2%})"
-        )
-        checked += 1
+        rels.append(abs(numeric - analytic) / max(abs(numeric), abs(analytic), 1e-12))
+    return rels
 
-    assert checked > 0, "no cell carried gradient — the test verified nothing"
+
+@pytest.mark.parametrize("terrain", ["flat", "rough"])
+@pytest.mark.parametrize("robot", ROBOTS)
+@pytest.mark.parametrize("engine", ["torch", "warp"])
+def test_gradient_matches_finite_differences(engine, robot, terrain):
+    """Each engine's support gradient must match central finite differences.
+
+    Catches both engines agreeing on the same mistake; torch is the parity
+    reference and nothing else checks it. Before the contact force was made
+    continuous at touchdown (Hunt-Crossley damping) the analytic gradient ran
+    5-35 % low (rel errors up to 0.43 here); see FD_REL_TOL for the measured
+    errors since.
+    """
+    rels = _fd_rel_errors(engine, robot, terrain)
+    assert rels, "no cell carried gradient — the test verified nothing"
+    assert max(rels) < FD_REL_TOL[terrain], f"{engine} {robot} {terrain}: rel errors {rels}"
 
 
 def test_both_wrappers_share_one_default_horizon():

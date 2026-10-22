@@ -187,7 +187,6 @@ class Simulator(torch.nn.Module):
             world_config, self.robot_model, batch_size, self.device
         )
 
-    @torch.no_grad()
     def raise_to_clearance(
         self, x: torch.Tensor, q: torch.Tensor, world_config: WorldConfig
     ) -> torch.Tensor:
