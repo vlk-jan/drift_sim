@@ -15,6 +15,10 @@ from utils.geometry import quat_to_rotmat
 # chord costs r (1 - cos(pi / N)) of radius where the local ground tilts against
 # the body: 6.4 mm at 16 (~ the 7.3 mm tyre sag), 1.6 mm at 32.
 NUM_WHEEL_POINTS = 32
+# Version of the contact and friction law in both engines. Bump it with any change
+# to how contact forces are computed: run records store it (utils.misc.
+# robot_constants), and checkpoints from another law are refused for scoring.
+CONTACT_LAW = "wheel-deepest-point-v1"
 
 # --- Rigid-body model ---
 # COG and wheel triangle are parameters; contact forces do not spin the wheels
