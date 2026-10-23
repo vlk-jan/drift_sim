@@ -188,9 +188,11 @@ class DPhysicsEngine(torch.nn.Module):
         in_contact = (dh_points < 0).float()  # (B, W, P, 1)
 
         # (B, W, P, 3)
+        # Rim points are body-fixed: only the body velocity compresses the
+        # contact; wheel spin is tyre surface speed and enters friction only.
         F_springs = self._calculate_spring_force(
             dh_points,
-            vels_wheel_contact,
+            v_rigid,
             normals,
             stif_coeffs,
             in_contact,

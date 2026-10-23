@@ -240,12 +240,11 @@ def contact_point(
 
     # Contact-point velocity: body motion + wheel spin about the wheel's own axis.
     wheel_omega_world = wp.quat_rotate(q, wp.vec3(0.0, controls[step, b][w], 0.0))
-    v_total = (
-        xd
-        + wp.cross(omega, p_world - x)
-        + wp.cross(wheel_omega_world, p_world - w_center_world)
-    )
-    vn = wp.dot(v_total, n_surf)
+    v_body = xd + wp.cross(omega, p_world - x)
+    v_total = v_body + wp.cross(wheel_omega_world, p_world - w_center_world)
+    # Rim points are body-fixed: only the body velocity compresses the contact;
+    # wheel spin is tyre surface speed and enters friction only.
+    vn = wp.dot(v_body, n_surf)
 
     b_damp = damping_alpha * 2.0 * wp.sqrt(mass) * wp.sqrt(k_s)
     # Hunt-Crossley damping, zero at zero depth (see simulator/engine.py).
@@ -255,7 +254,7 @@ def contact_point(
     F_spring = n_surf * f_mag
 
     # Friction uses the tangential velocity only (see simulator/engine.py).
-    v_tangential = v_total - vn * n_surf
+    v_tangential = v_total - wp.dot(v_total, n_surf) * n_surf
     # Slip at the end of the step under gravity (see simulator/engine.py).
     g_t = wp.vec3(0.0, 0.0, -gravity) + (gravity * n_surf[2]) * n_surf
     v_slip = v_tangential + g_t * dt
