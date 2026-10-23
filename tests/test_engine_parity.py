@@ -18,7 +18,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 ROBOTS = ("helhest", "helhest_v2")
 GRID_N = 128
 RES = 0.1
-MAX_COORD = 6.4
+MAX_COORD = GRID_N * RES / 2 - RES / 2  # outermost cell centre, as world_cfg_from_config: 6.35
 DT = 1e-3
 # Training runs at 2e-3 (PhysicsEngineConfig.dt), so parity is checked there too.
 DT_TRAIN = 2e-3
