@@ -1,6 +1,7 @@
 """Warp port of the spring-contact engine in simulator/engine.py.
 
-Same physics (hard ReLU contact, `max(-k*dh - b*vn, 0)`), ~10x cheaper per
+Same physics (hard contact gate, Hunt-Crossley spring `relu(-dh*(k - lam*vn))`
+with vn the body velocity of the point along the normal), ~10x cheaper per
 rollout. Keep the engines formula-for-formula identical: tests/test_engine_parity.py
 checks forward poses and gradients between them.
 
