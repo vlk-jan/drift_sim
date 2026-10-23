@@ -11,6 +11,11 @@ from simulator.utils import (
 )
 from utils.geometry import quat_to_rotmat
 
+# Rim sample points per wheel, shared with simulator/engine_wp.py. The polygon
+# chord costs r (1 - cos(pi / N)) of radius where the local ground tilts against
+# the body: 6.4 mm at 16 (~ the 7.3 mm tyre sag), 1.6 mm at 32.
+NUM_WHEEL_POINTS = 32
+
 # --- Rigid-body model ---
 # COG and wheel triangle are parameters; contact forces do not spin the wheels
 # and are transferred straight to the axle.
@@ -26,7 +31,7 @@ class DPhysicsEngine(torch.nn.Module):
         self.config = config
         self.robot_model = robot_model
         self.register_buffer(
-            "_wheel_pos_rel", self._precompute_wheel_points(n_points=16)
+            "_wheel_pos_rel", self._precompute_wheel_points(NUM_WHEEL_POINTS)
         )
         self.register_buffer("_I_body", robot_model.inertia_tensor.float())
         self.register_buffer(
@@ -41,7 +46,7 @@ class DPhysicsEngine(torch.nn.Module):
         ).unsqueeze(0)
         self.register_buffer("_F_g", F_g)
 
-    def _precompute_wheel_points(self, n_points: int = 16) -> torch.Tensor:
+    def _precompute_wheel_points(self, n_points: int) -> torch.Tensor:
         """Precompute wheel points relative to wheel centers."""
         # Drop the endpoint, which duplicates theta=0.
         theta = torch.linspace(0, 2 * torch.pi, n_points + 1)[:-1]
@@ -116,8 +121,13 @@ class DPhysicsEngine(torch.nn.Module):
     ) -> torch.Tensor:
         """Compute the damped contact spring force on the wheel points.
 
-        Each penetrating point is a spring of k / n_wheels, summed: one point per
-        wheel on flat ground gives the whole-robot k (sag m g / k). Damping is
+        Each wheel is a spring of k / n_wheels on its DEEPEST point's depth D,
+        shared over its penetrating points by depth (point i carries
+        d_i D / sum d): flat ground gives the whole-robot k (sag m g / k) at any
+        point count. Summing a k / n_wheels spring per point instead stiffened the
+        wheel with every extra rim point under the sag (at 32 points the
+        neighbours sit 6.4 mm up, inside v2's 7.3 mm sag). A point starts
+        touching at zero share, so the force stays continuous. Damping is
         Hunt-Crossley, proportional to depth: F = depth (k - lam v_n), lam =
         b k / (m g), b = alpha 2 sqrt(m k). At the rest sag depth m g / k it is b
         (critical heave damping, as before); at zero depth it is zero, as for a
@@ -135,6 +145,8 @@ class DPhysicsEngine(torch.nn.Module):
 
         # relu makes it unilateral (the ground only pushes).
         depth = (-dh_points).clamp_min(0)
+        D = depth.amax(dim=2, keepdim=True)  # (B, W, 1, 1)
+        depth = depth * D / depth.sum(dim=2, keepdim=True).clamp_min(1e-12)
         F_spring_mag = torch.relu(depth * (k - lam * xd_points_n))
 
         F_spring = F_spring_mag * normals

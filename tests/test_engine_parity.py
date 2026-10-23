@@ -41,9 +41,12 @@ GRAD_RATIO_RANGE = (0.95, 1.05)
 GRAD_RATIO_RANGE_BATCHED = (0.9, 1.1)
 # Same-run floor: torch self-vs-self is bit-identical, warp 7.5e-9 m.
 SAME_RUN_ATOL = 1e-4
-# Support gradient vs central finite differences (eps 2e-3 m, 250 x 1e-3 s),
-# worst cell measured 2026-10-23 (both engines, CPU): flat 0.0058, rough 0.028.
-# Rough fails the detached raise (0.071) and the old touchdown damping (0.33).
+# Support gradient vs central finite differences (eps 5e-4 m, 250 x 1e-3 s),
+# worst cell measured 2026-10-23 (both engines, CPU): flat 0.0063, rough 0.0065.
+# eps was 2e-3 until 32 rim points put neighbours within mm of touching, where a
+# 2 mm step is truncation error (flat 0.024 -> 0.017 -> 0.006 at 2e-3/1e-3/5e-4).
+# Rough fails the detached raise (0.071) and the old touchdown damping (0.33),
+# both measured at eps 2e-3.
 FD_REL_TOL = {"flat": 0.02, "rough": 0.06}
 
 
@@ -295,6 +298,46 @@ def test_initial_pose_override_is_honoured(engine):
     )
 
 
+def test_initial_state_gradients_match_torch():
+    """Gradients into a seeded initial q / xd / omega must flow in both engines.
+
+    Warp used to return None for them, silently cutting a graph that seeds a
+    segment from a differentiable state. q is compared in the tangent space:
+    torch normalises q, warp's rotation does not, so they differ along q itself.
+    """
+    n_steps = 250
+    t_horizon = n_steps * DT
+    support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon)
+    props = {"support": support.detach(), "friction": friction.detach()}
+    grads = {}
+    for engine in ("torch", "warp"):
+        init = {
+            "q": torch.tensor([[0.999, 0.0, 0.03, 0.02]], device=DEVICE),
+            "xd": torch.tensor([[0.5, 0.1, 0.0]], device=DEVICE),
+            "omega": torch.tensor([[0.0, 0.0, 0.2]], device=DEVICE),
+        }
+        init["q"] = init["q"] / init["q"].norm()
+        for t in init.values():
+            t.requires_grad_(True)
+        traj, _, _, _ = _make_sim(engine, t_horizon).predict_trajectory(
+            props, ctrl, ctrl_ts, initial_state=init
+        )
+        traj[:, :, :3, 3].pow(2).sum().backward()
+        q = init["q"].detach()
+        gq = init["q"].grad
+        grads[engine] = {
+            "q": gq - (gq * q).sum(-1, keepdim=True) * q,
+            "xd": init["xd"].grad,
+            "omega": init["omega"].grad,
+        }
+    for name in ("q", "xd", "omega"):
+        gt, gw = grads["torch"][name], grads["warp"][name]
+        assert gw is not None and gw.norm() > 0, f"warp: no gradient into init {name}"
+        assert _cos(gw, gt) > GRAD_COS_MIN, (name, _cos(gw, gt))
+        lo, hi = GRAD_RATIO_RANGE
+        assert lo < _ratio(gw, gt) < hi, (name, _ratio(gw, gt))
+
+
 @pytest.mark.parametrize("engine", ["torch", "warp"])
 def test_returned_timestamps_survive_epoch_scale_input(engine):
     """Predicted timestamps must resolve a 1 s window sitting at Unix-epoch scale.
@@ -340,7 +383,7 @@ def _rough_support():
     return (0.03 * z / z.abs().max()).to(DEVICE)
 
 
-def _fd_rel_errors(engine, robot, terrain, eps=2e-3):
+def _fd_rel_errors(engine, robot, terrain, eps=5e-4):
     """Relative error |fd - analytic| / max(|fd|, |analytic|) of the support
     gradient at the 4 cells of largest |gradient| (wheel contacts sit off the
     grid centre).

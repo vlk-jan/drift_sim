@@ -60,6 +60,9 @@ def interpolate_grid(grid, xy, max_coord):
     if grid.shape[0] != B:
         grid = grid.expand(B, -1, -1, -1)
 
-    sampled = F.grid_sample(grid, xy_norm, mode="bilinear", align_corners=True)
+    # Border padding, as the engines: zeros would put a cliff at the map edge.
+    sampled = F.grid_sample(
+        grid, xy_norm, mode="bilinear", align_corners=True, padding_mode="border"
+    )
 
     return sampled.permute(0, 2, 3, 1)

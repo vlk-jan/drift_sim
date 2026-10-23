@@ -56,13 +56,13 @@ def _apply_initial_state_override(state, initial_state, device):
         if unused:
             raise ValueError(f"initial_state keys not used by the simulator: {unused}")
         if "x" in initial_state:
-            state.x = initial_state["x"].to(device)
+            state.x = initial_state["x"].to(device, torch.float32)
         if "q" in initial_state:
-            state.q = initial_state["q"].to(device)
+            state.q = initial_state["q"].to(device, torch.float32)
         if "xd" in initial_state:
-            state.xd = initial_state["xd"].to(device)
+            state.xd = initial_state["xd"].to(device, torch.float32)
         if "omega" in initial_state:
-            state.omega = initial_state["omega"].to(device)
+            state.omega = initial_state["omega"].to(device, torch.float32)
     return state
 
 

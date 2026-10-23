@@ -1,6 +1,6 @@
 """Warp port of the spring-contact engine in simulator/engine.py.
 
-Same physics (hard contact gate, Hunt-Crossley spring `relu(-dh*(k - lam*vn))`
+Same physics (hard contact gate, Hunt-Crossley spring `relu(depth*(k - lam*vn))`
 with vn the body velocity of the point along the normal), ~10x cheaper per
 rollout. Keep the engines formula-for-formula identical: tests/test_engine_parity.py
 checks forward poses and gradients between them.
@@ -22,6 +22,8 @@ import numpy as np
 import torch
 import warp as wp
 
+from simulator.engine import NUM_WHEEL_POINTS as _NUM_WHEEL_POINTS
+
 wp.init()
 
 # The warp adjoint zeroes non-finite gradients while the torch engine propagates
@@ -31,7 +33,7 @@ _WARNED_NONFINITE_GRAD = False
 # Compile-time constants so their loops unroll; don't make these kernel
 # parameters (see module docstring).
 NUM_WHEELS = wp.constant(3)
-NUM_WHEEL_POINTS = wp.constant(16)
+NUM_WHEEL_POINTS = wp.constant(_NUM_WHEEL_POINTS)
 
 
 # --- Helper math (device functions) ---
@@ -151,11 +153,16 @@ def depth_sum_kernel(
     grid_center: wp.vec2,
     max_coord: wp.vec2,
     depth_sum: wp.array2d(dtype=float),
+    wheel_depth_sum: wp.array3d(dtype=float),
+    wheel_depth_max: wp.array3d(dtype=float),
 ):
-    """Pass 1: sum the penetration depth over each robot's sample points.
+    """Pass 1: sum the penetration depth over each robot's sample points, and
+    sum and max it per wheel.
 
-    The friction impulse limit shares itself over the contacts by depth, so the
-    sum needs its own launch before force accumulation.
+    The friction impulse limit shares itself over the contacts by depth, and a
+    wheel's spring acts on its deepest point shared by depth (simulator/
+    engine.py::_calculate_spring_force), so these need their own launch before
+    force accumulation.
     """
     b, w, i = wp.tid()
 
@@ -176,6 +183,8 @@ def depth_sum_kernel(
     dist = (p_world[2] - z_surf) * n_surf[2]
     if dist < 0.0:
         wp.atomic_add(depth_sum, step, b, -dist)
+        wp.atomic_add(wheel_depth_sum, step, b, w, -dist)
+        wp.atomic_max(wheel_depth_max, step, b, w, -dist)
 
 
 @wp.func
@@ -206,6 +215,8 @@ def contact_point(
     slip_ref_ratio: float,
     slip_floor_velocity: float,
     depth_sum: wp.array2d(dtype=float),
+    wheel_depth_sum: wp.array3d(dtype=float),
+    wheel_depth_max: wp.array3d(dtype=float),
 ):
     """Spring force, friction law and impulse limit of one sample point.
 
@@ -251,8 +262,12 @@ def contact_point(
     b_damp = damping_alpha * 2.0 * wp.sqrt(mass) * wp.sqrt(k_s)
     # Hunt-Crossley damping, zero at zero depth (see simulator/engine.py).
     lam = b_damp * k_s / (mass * gravity)
-    # Per-point spring k / n_wheels, summed (see simulator/engine.py).
-    f_mag = wp.max(-dist * (k_s - lam * vn), 0.0) / float(NUM_WHEELS)
+    # Wheel spring k / n_wheels on its deepest point, shared by depth (see
+    # simulator/engine.py).
+    depth = -dist * wheel_depth_max[step, b, w] / wp.max(
+        wheel_depth_sum[step, b, w], 1.0e-12
+    )
+    f_mag = wp.max(depth * (k_s - lam * vn), 0.0) / float(NUM_WHEELS)
     F_spring = n_surf * f_mag
 
     # Friction uses the tangential velocity only (see simulator/engine.py).
@@ -268,7 +283,7 @@ def contact_point(
     v_roll = wp.max(wp.abs(controls[step, b][w]) * wheel_radii[w], slip_floor_velocity)
     slip = v_mag / v_roll
     f_c_mag = f_val * F_N * wp.tanh(slip / slip_ref_ratio)
-    if f_mag <= 1.0e-6:
+    if f_mag <= 0.0:
         f_c_mag = 0.0
 
     # Impulse limit: stop the slip in one step through the effective mass,
@@ -341,6 +356,8 @@ def accumulate_forces_kernel(
     slip_ref_ratio: float,
     slip_floor_velocity: float,
     depth_sum: wp.array2d(dtype=float),
+    wheel_depth_sum: wp.array3d(dtype=float),
+    wheel_depth_max: wp.array3d(dtype=float),
     force_acc: wp.array2d(dtype=wp.vec3),
     torque_acc: wp.array2d(dtype=wp.vec3),
 ):
@@ -351,6 +368,7 @@ def accumulate_forces_kernel(
         wheel_centers, wheel_radii, cog, mass, inertia_body_inv, gravity, z_grid,
         normals_grid, friction_grid, stiffness_grid, grid_center, max_coord, dt,
         damping_alpha, slip_ref_ratio, slip_floor_velocity, depth_sum,
+        wheel_depth_sum, wheel_depth_max,
     )  # fmt: skip
     if not hit:
         return
@@ -387,6 +405,8 @@ def friction_cut_kernel(
     ang_damping: float,
     torque_limit: float,
     depth_sum: wp.array2d(dtype=float),
+    wheel_depth_sum: wp.array3d(dtype=float),
+    wheel_depth_max: wp.array3d(dtype=float),
     force_acc: wp.array2d(dtype=wp.vec3),
     torque_acc: wp.array2d(dtype=wp.vec3),
     force_cut: wp.array2d(dtype=wp.vec3),
@@ -401,6 +421,7 @@ def friction_cut_kernel(
         wheel_centers, wheel_radii, cog, mass, inertia_body_inv, gravity, z_grid,
         normals_grid, friction_grid, stiffness_grid, grid_center, max_coord, dt,
         damping_alpha, slip_ref_ratio, slip_floor_velocity, depth_sum,
+        wheel_depth_sum, wheel_depth_max,
     )  # fmt: skip
     if not hit:
         return
@@ -511,8 +532,12 @@ class _Rollout:
         self.state = [z((num_steps + 1, B), t) for t in (wp.vec3, wp.quat, wp.vec3, wp.vec3)]
         state_x, state_q, state_xd, state_omega = self.state
         depth_sum = z((num_steps, B), float)
-        self.acc = [depth_sum] + [z((num_steps, B), wp.vec3) for _ in range(4)]
-        _, force_acc, torque_acc, force_cut, torque_cut = self.acc
+        wheel_depth = [z((num_steps, B, int(NUM_WHEELS)), float) for _ in range(2)]
+        self.acc = [depth_sum, *wheel_depth] + [
+            z((num_steps, B), wp.vec3) for _ in range(4)
+        ]
+        (_, wheel_depth_sum, wheel_depth_max,
+         force_acc, torque_acc, force_cut, torque_cut) = self.acc  # fmt: skip
         # Incoming output gradients, copied in before the adjoint graph.
         self.seed = [z((num_steps, B), t, False) for t in (wp.vec3, wp.quat, wp.vec3, wp.vec3)]
         self.generation = 0
@@ -530,19 +555,22 @@ class _Rollout:
                 for step in range(num_steps):
                     wp.launch(depth_sum_kernel, dim=point_dim, inputs=[
                         step, state_x, state_q, wheel_centers_wp, wheel_radii_wp, wz, wn,
-                        gc, mc], outputs=[depth_sum], device=device)  # fmt: skip
+                        gc, mc], outputs=[depth_sum, wheel_depth_sum, wheel_depth_max],
+                        device=device)  # fmt: skip
                     wp.launch(accumulate_forces_kernel, dim=point_dim, inputs=[
                         step, state_x, state_q, state_xd, state_omega, ctrl,
                         wheel_centers_wp, wheel_radii_wp, cog_wp, mass, inertia_inv_wp, g,
                         wz, wn, kf, ks, gc, mc, dt, damping_alpha, slip_ref_ratio,
-                        slip_floor_velocity, depth_sum], outputs=[force_acc, torque_acc],
+                        slip_floor_velocity, depth_sum, wheel_depth_sum, wheel_depth_max],
+                        outputs=[force_acc, torque_acc],
                         device=device)  # fmt: skip
                     wp.launch(friction_cut_kernel, dim=point_dim, inputs=[
                         step, state_x, state_q, state_xd, state_omega, ctrl,
                         wheel_centers_wp, wheel_radii_wp, cog_wp, mass, inertia_wp,
                         inertia_inv_wp, g, wz, wn, kf, ks, gc, mc, dt, damping_alpha,
                         slip_ref_ratio, slip_floor_velocity, ang_damping, torque_limit,
-                        depth_sum, force_acc, torque_acc], outputs=[force_cut, torque_cut],
+                        depth_sum, wheel_depth_sum, wheel_depth_max, force_acc, torque_acc],
+                        outputs=[force_cut, torque_cut],
                         device=device)  # fmt: skip
                     wp.launch(integrate_kernel, dim=B, inputs=[
                         step, state_x, state_q, state_xd, state_omega, inertia_wp,
@@ -666,9 +694,6 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
         ro.generation += 1
         ctx.rollout, ctx.generation = ro, ro.generation
-        # The seated start height depends on the terrain (simulator/utils.py::
-        # raise_to_clearance), so x0 takes the adjoint left in state_x.grad[0].
-        ctx.init_x_grad = init_x.requires_grad
 
         # Drop the seeded step 0 to match the torch engine, whose first pose is the
         # state after one step.
@@ -721,14 +746,19 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             return zero_nonfinite(wp.to_torch(arr.grad).clone().detach(), name)
 
         need = ctx.needs_input_grad
-        init_x_grad = None
-        if ctx.init_x_grad:
-            init_x_grad = zero_nonfinite(wp.to_torch(ro.state[0].grad)[0].clone(), "init_x")
+        # The initial state's adjoint is what the tape left in state_*.grad[0]
+        # (x0 takes one through the clearance raise, simulator/utils.py::
+        # raise_to_clearance; the rest when a caller seeds them with grad).
+        init = [
+            zero_nonfinite(wp.to_torch(s.grad)[0].clone(), name) if need[i] else None
+            for i, (s, name) in enumerate(
+                zip(ro.state, ("init_x", "init_q", "init_xd", "init_omega"))
+            )
+        ]
+        if init[1] is not None:
+            init[1] = init[1][..., [3, 0, 1, 2]]  # XYZW -> WXYZ
         return (
-            init_x_grad,  # init_x: through the clearance raise
-            None,  # init_q
-            None,  # init_xd
-            None,  # init_omega
+            *init,
             get_grad(ro.ctrl, "ctrl", need[4]),
             get_grad(ro.z, "z", need[5]),
             get_grad(ro.n, "n", need[6]),

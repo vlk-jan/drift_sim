@@ -130,7 +130,7 @@ class RobotModelConfig:
     wheel_centers: torch.Tensor
     inertia_tensor: torch.Tensor
     # Whole-robot tyre stiffness (N/m): static sag on flat ground is m*g/k, since
-    # each penetrating point is a spring of k / n_wheels (one per wheel on flat).
+    # each wheel is a spring of k / n_wheels on its deepest rim point.
     contact_stiffness: float
     # Height of the rig's lidar height map above the wheel-contact model on rigid
     # ground (m): proprio labels add it so rigid ground is hr = 0, as hr_rigid says.
@@ -472,9 +472,9 @@ def find_init_rob_position(
         denom = (2 * (1 + c)).clamp_min(1e-6).sqrt()
         q_new = torch.cat([denom * 0.5, v_cross / denom], dim=1)
         q_new = q_new / (q_new.norm(dim=1, keepdim=True) + 1e-6)
-        is_par = c.abs() > (1.0 - 1e-4)
-        q_par = torch.where(c.expand_as(q_new) > 0, q_identity, q_flip)
-        q_new = torch.where(is_par.expand_as(q_new), q_par, q_new)
+        # Only the antiparallel case is singular; at c -> 1 the formula above
+        # tends to identity on its own (guarding |c| snapped slopes < 0.81 deg flat).
+        q_new = torch.where((c < -1.0 + 1e-4).expand_as(q_new), q_flip, q_new)
 
         # z_body = target_z - (R_new @ wc_body)_z per wheel; the max keeps every
         # wheel at or above its contact height.
