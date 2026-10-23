@@ -725,12 +725,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
         ctx.tape.backward()
 
-        def get_grad(name):
+        def zero_nonfinite(g, name):
             global _WARNED_NONFINITE_GRAD
-            arr = ctx.wp_inputs[name]
-            if not (arr.requires_grad and arr.grad is not None):
-                return None
-            g = wp.to_torch(arr.grad).clone().detach()
             nonfinite = int((~torch.isfinite(g)).sum())
             if nonfinite and not _WARNED_NONFINITE_GRAD:
                 _WARNED_NONFINITE_GRAD = True
@@ -745,9 +741,15 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                 )
             return torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
 
+        def get_grad(name):
+            arr = ctx.wp_inputs[name]
+            if not (arr.requires_grad and arr.grad is not None):
+                return None
+            return zero_nonfinite(wp.to_torch(arr.grad).clone().detach(), name)
+
         init_x_grad = None
         if ctx.init_x_grad:
-            init_x_grad = torch.nan_to_num(wp.to_torch(state_x.grad)[0].clone())
+            init_x_grad = zero_nonfinite(wp.to_torch(state_x.grad)[0].clone(), "init_x")
         return (
             init_x_grad,  # init_x: through the clearance raise
             None,  # init_q
