@@ -18,6 +18,7 @@ reintroducing such loops.
 
 import warnings
 
+import numpy as np
 import torch
 import warp as wp
 
@@ -483,10 +484,128 @@ def integrate_kernel(
 
 
 # --- Autograd bridge ---
-class WarpTrajectoryFunc(torch.autograd.Function):
-    """Roll the trajectory on a wp.Tape and hand the adjoint back to torch.
+class _Rollout:
+    """Persistent buffers and two captured graphs (forward, adjoint) for one shape.
 
-    Stiffness gets no gradient: it is neither predicted nor adapted.
+    The rollout is ~1000 tiny launches per call (4 kernels x steps, and as many
+    adjoints) and was CPU-launch-bound: ~95 ms wall for ~30 ms of GPU work at
+    B*n = 128 x 125 steps. Captured once per shape and constants, a call is a
+    copy into these buffers plus one graph launch each way. Same kernels in the
+    same order, so the same numbers as launching them one by one.
+    """
+
+    def __init__(self, B, num_steps, H, W, device, consts):
+        (wheel_centers_wp, wheel_radii_wp, inertia_wp, inertia_inv_wp, cog_wp, mass,
+         gc, mc, dt, g, damping_alpha, slip_ref_ratio, slip_floor_velocity,
+         ang_damping, torque_limit, com_transfer) = consts  # fmt: skip
+        z = lambda shape, dtype, grad=True: wp.zeros(  # noqa: E731
+            shape, dtype=dtype, device=device, requires_grad=grad
+        )
+        # Inputs, copied in per call; stiffness takes no gradient.
+        self.ctrl = z((num_steps, B), wp.vec3)
+        self.z, self.n = z((B, H, W), wp.float32), z((B, H, W), wp.vec3)
+        self.kf, self.ks = z((B, H, W), wp.float32), z((B, H, W), wp.float32, False)
+        self.init = [z(B, t, False) for t in (wp.vec3, wp.quat, wp.vec3, wp.vec3)]
+        # One slot per step keeps every launch's primal inputs intact for the tape;
+        # per-step accumulators too (a reused buffer needs an undifferentiable zeroing).
+        self.state = [z((num_steps + 1, B), t) for t in (wp.vec3, wp.quat, wp.vec3, wp.vec3)]
+        state_x, state_q, state_xd, state_omega = self.state
+        depth_sum = z((num_steps, B), float)
+        self.acc = [depth_sum] + [z((num_steps, B), wp.vec3) for _ in range(4)]
+        _, force_acc, torque_acc, force_cut, torque_cut = self.acc
+        # Incoming output gradients, copied in before the adjoint graph.
+        self.seed = [z((num_steps, B), t, False) for t in (wp.vec3, wp.quat, wp.vec3, wp.vec3)]
+        self.generation = 0
+        self.device = device
+
+        ctrl, wz, wn, kf, ks = self.ctrl, self.z, self.n, self.kf, self.ks
+        point_dim = (B, int(NUM_WHEELS), int(NUM_WHEEL_POINTS))
+        self.tape = wp.Tape()
+        with wp.ScopedCapture(device) as cap:
+            for a in self.acc:
+                a.zero_()
+            for s, i in zip(self.state, self.init):
+                wp.copy(s[0], i)
+            with self.tape:
+                for step in range(num_steps):
+                    wp.launch(depth_sum_kernel, dim=point_dim, inputs=[
+                        step, state_x, state_q, wheel_centers_wp, wheel_radii_wp, wz, wn,
+                        gc, mc], outputs=[depth_sum], device=device)  # fmt: skip
+                    wp.launch(accumulate_forces_kernel, dim=point_dim, inputs=[
+                        step, state_x, state_q, state_xd, state_omega, ctrl,
+                        wheel_centers_wp, wheel_radii_wp, cog_wp, mass, inertia_inv_wp, g,
+                        wz, wn, kf, ks, gc, mc, dt, damping_alpha, slip_ref_ratio,
+                        slip_floor_velocity, depth_sum], outputs=[force_acc, torque_acc],
+                        device=device)  # fmt: skip
+                    wp.launch(friction_cut_kernel, dim=point_dim, inputs=[
+                        step, state_x, state_q, state_xd, state_omega, ctrl,
+                        wheel_centers_wp, wheel_radii_wp, cog_wp, mass, inertia_wp,
+                        inertia_inv_wp, g, wz, wn, kf, ks, gc, mc, dt, damping_alpha,
+                        slip_ref_ratio, slip_floor_velocity, ang_damping, torque_limit,
+                        depth_sum, force_acc, torque_acc], outputs=[force_cut, torque_cut],
+                        device=device)  # fmt: skip
+                    wp.launch(integrate_kernel, dim=B, inputs=[
+                        step, state_x, state_q, state_xd, state_omega, inertia_wp,
+                        inertia_inv_wp, mass, g, dt, ang_damping, torque_limit, cog_wp,
+                        com_transfer, force_acc, torque_acc, force_cut, torque_cut],
+                        device=device)  # fmt: skip
+        self.forward_graph = cap.graph
+        with wp.ScopedCapture(device) as cap:
+            # Every adjoint accumulates, so all of them start from zero.
+            for a in (*self.state, *self.acc, ctrl, wz, wn, kf):
+                a.grad.zero_()
+            # Step 0 is the seeded initial state, not an output.
+            for s, sd in zip(self.state, self.seed):
+                wp.copy(s.grad[1:], sd)
+            self.tape.backward()
+        self.adjoint_graph = cap.graph
+        # The buffer zeroing above ran on warp's stream; replays run on torch's.
+        wp.synchronize_device(device)
+
+
+def _launch(graph, device):
+    """Replay a captured graph on warp's stream, ordered against torch's current
+    stream both ways by events: after the torch copies into the buffers, before
+    torch reads the outputs. Explicit, so it does not rest on warp's stream
+    synchronising implicitly with torch's legacy default stream. (Replaying on
+    torch's stream itself gave wrong adjoints, 2026-10-23.) Each DDP rank is its
+    own process with its own cache."""
+    if not device.is_cuda:
+        wp.capture_launch(graph)
+        return
+    ws, ts = wp.get_stream(device), wp.stream_from_torch(torch.cuda.current_stream(device.ordinal))
+    ws.wait_stream(ts)
+    wp.capture_launch(graph, stream=ws)
+    ts.wait_stream(ws)
+
+
+# Rollouts by (shape, constants); a few shapes at most (train, val, a last batch).
+_ROLLOUTS: dict = {}
+_MAX_ROLLOUTS = 4
+
+
+def _get_rollout(B, num_steps, H, W, device, consts, with_grad):
+    # Everything a captured graph bakes in: shapes, device, and every scalar kernel
+    # argument by value (floats, vec/mat entries); robot arrays by address (their
+    # contents are read at replay, and the tape keeps them alive).
+    key = (B, num_steps, H, W, str(device), bool(with_grad), tuple(
+        c.ptr if isinstance(c, wp.array) else tuple(np.asarray(c, dtype=np.float64).ravel().tolist())
+        for c in consts))
+    ro = _ROLLOUTS.pop(key, None)
+    if ro is None:
+        if len(_ROLLOUTS) >= _MAX_ROLLOUTS:
+            _ROLLOUTS.pop(next(iter(_ROLLOUTS)))  # least recently used
+        ro = _Rollout(B, num_steps, H, W, device, consts)
+    _ROLLOUTS[key] = ro
+    return ro
+
+
+class WarpTrajectoryFunc(torch.autograd.Function):
+    """Roll the trajectory on a captured wp.Tape and hand the adjoint back to torch.
+
+    Stiffness gets no gradient: it is neither predicted nor adapted. The buffers
+    are shared per shape (_Rollout), so a second rollout of the same shape before
+    the first one's backward invalidates the first; its backward then raises.
     """
 
     @staticmethod
@@ -518,185 +637,42 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         ang_damping,
         torque_limit,
         com_transfer,
+        with_grad,
         device_str,
     ):
         device = wp.get_device(device_str)
         B = init_x.shape[0]
+        H, W = z_grid_t.shape[1:]
+        consts = (
+            wheel_centers_wp, wheel_radii_wp, inertia_wp, inertia_inv_wp, cog_wp, mass,
+            wp.vec2(float(grid_center_t[0]), float(grid_center_t[1])),
+            wp.vec2(float(max_coord_t[0]), float(max_coord_t[1])),
+            dt, g, damping_alpha, slip_ref_ratio, slip_floor_velocity, ang_damping,
+            torque_limit, com_transfer,
+        )  # fmt: skip
+        ro = _get_rollout(B, num_steps, H, W, device, consts, with_grad)
 
-        def to_wp(t, dtype, grad=None):
-            requires_grad = t.requires_grad if grad is None else grad
-            return wp.from_torch(
-                t.detach().contiguous(), dtype=dtype, requires_grad=requires_grad
-            )
+        def put(arr, t):
+            wp.to_torch(arr).copy_(t.detach().reshape(wp.to_torch(arr).shape))
 
-        wp_ctrl = to_wp(control_velocities, wp.vec3)
-        wp_z = to_wp(z_grid_t, wp.float32)
-        wp_n = to_wp(normals_grid_t, wp.vec3)
-        wp_kf = to_wp(friction_grid_t, wp.float32)
-        wp_ks = to_wp(stiffness_grid_t, wp.float32, grad=False)
+        put(ro.ctrl, control_velocities)
+        put(ro.z, z_grid_t)
+        put(ro.n, normals_grid_t)
+        put(ro.kf, friction_grid_t)
+        put(ro.ks, stiffness_grid_t)
+        for arr, t in zip(ro.init, (init_x, init_q[:, [1, 2, 3, 0]], init_xd, init_omega)):
+            put(arr, t)
+        _launch(ro.forward_graph, device)
 
-        # One slot per step keeps every launch's primal inputs intact for the tape.
-        state_x = wp.zeros(
-            (num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True
-        )
-        state_q = wp.zeros(
-            (num_steps + 1, B), dtype=wp.quat, device=device, requires_grad=True
-        )
-        state_xd = wp.zeros(
-            (num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True
-        )
-        state_omega = wp.zeros(
-            (num_steps + 1, B), dtype=wp.vec3, device=device, requires_grad=True
-        )
-
-        wp.copy(state_x[0], to_wp(init_x, wp.vec3, grad=False))
-        wp.copy(state_q[0], to_wp(init_q[:, [1, 2, 3, 0]], wp.quat, grad=False))
-        wp.copy(state_xd[0], to_wp(init_xd, wp.vec3, grad=False))
-        wp.copy(state_omega[0], to_wp(init_omega, wp.vec3, grad=False))
-
-        # Per-step accumulators too: a reused buffer needs a zeroing pass the tape
-        # cannot differentiate.
-        depth_sum = wp.zeros(
-            (num_steps, B), dtype=float, device=device, requires_grad=True
-        )
-        force_acc = wp.zeros(
-            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
-        )
-        torque_acc = wp.zeros(
-            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
-        )
-        force_cut = wp.zeros(
-            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
-        )
-        torque_cut = wp.zeros(
-            (num_steps, B), dtype=wp.vec3, device=device, requires_grad=True
-        )
-
-        gc_wp = wp.vec2(float(grid_center_t[0]), float(grid_center_t[1]))
-        mc_wp = wp.vec2(float(max_coord_t[0]), float(max_coord_t[1]))
-        point_dim = (B, int(NUM_WHEELS), int(NUM_WHEEL_POINTS))
-
-        ctx.tape = wp.Tape()
-        with ctx.tape:
-            for step in range(num_steps):
-                wp.launch(
-                    depth_sum_kernel,
-                    dim=point_dim,
-                    inputs=[
-                        step,
-                        state_x,
-                        state_q,
-                        wheel_centers_wp,
-                        wheel_radii_wp,
-                        wp_z,
-                        wp_n,
-                        gc_wp,
-                        mc_wp,
-                    ],
-                    outputs=[depth_sum],
-                    device=device,
-                )
-                wp.launch(
-                    accumulate_forces_kernel,
-                    dim=point_dim,
-                    inputs=[
-                        step,
-                        state_x,
-                        state_q,
-                        state_xd,
-                        state_omega,
-                        wp_ctrl,
-                        wheel_centers_wp,
-                        wheel_radii_wp,
-                        cog_wp,
-                        mass,
-                        inertia_inv_wp,
-                        g,
-                        wp_z,
-                        wp_n,
-                        wp_kf,
-                        wp_ks,
-                        gc_wp,
-                        mc_wp,
-                        dt,
-                        damping_alpha,
-                        slip_ref_ratio,
-                        slip_floor_velocity,
-                        depth_sum,
-                    ],
-                    outputs=[force_acc, torque_acc],
-                    device=device,
-                )
-                wp.launch(
-                    friction_cut_kernel,
-                    dim=point_dim,
-                    inputs=[
-                        step,
-                        state_x,
-                        state_q,
-                        state_xd,
-                        state_omega,
-                        wp_ctrl,
-                        wheel_centers_wp,
-                        wheel_radii_wp,
-                        cog_wp,
-                        mass,
-                        inertia_wp,
-                        inertia_inv_wp,
-                        g,
-                        wp_z,
-                        wp_n,
-                        wp_kf,
-                        wp_ks,
-                        gc_wp,
-                        mc_wp,
-                        dt,
-                        damping_alpha,
-                        slip_ref_ratio,
-                        slip_floor_velocity,
-                        ang_damping,
-                        torque_limit,
-                        depth_sum,
-                        force_acc,
-                        torque_acc,
-                    ],
-                    outputs=[force_cut, torque_cut],
-                    device=device,
-                )
-                wp.launch(
-                    integrate_kernel,
-                    dim=B,
-                    inputs=[
-                        step,
-                        state_x,
-                        state_q,
-                        state_xd,
-                        state_omega,
-                        inertia_wp,
-                        inertia_inv_wp,
-                        mass,
-                        g,
-                        dt,
-                        ang_damping,
-                        torque_limit,
-                        cog_wp,
-                        com_transfer,
-                        force_acc,
-                        torque_acc,
-                        force_cut,
-                        torque_cut,
-                    ],
-                    device=device,
-                )
-
-        ctx.wp_inputs = {"ctrl": wp_ctrl, "z": wp_z, "n": wp_n, "kf": wp_kf}
+        ro.generation += 1
+        ctx.rollout, ctx.generation = ro, ro.generation
         # The seated start height depends on the terrain (simulator/utils.py::
         # raise_to_clearance), so x0 takes the adjoint left in state_x.grad[0].
         ctx.init_x_grad = init_x.requires_grad
-        ctx.state = (state_x, state_q, state_xd, state_omega)
 
         # Drop the seeded step 0 to match the torch engine, whose first pose is the
         # state after one step.
+        state_x, state_q, state_xd, state_omega = ro.state
         out_q_xyzw = wp.to_torch(state_q)[1:]
         return (
             wp.to_torch(state_x)[1:].clone(),
@@ -707,23 +683,21 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_x, grad_q, grad_xd, grad_omega):
-        state_x, state_q, state_xd, state_omega = ctx.state
-
-        def seed(arr, g, quat=False):
-            if g is None:
-                return
-            g = g.contiguous()
-            if quat:  # WXYZ -> XYZW
-                g = g[..., [1, 2, 3, 0]].contiguous()
-            # Step 0 is the seeded initial state, not an output.
-            wp.copy(arr.grad[1:], wp.from_torch(g, dtype=arr.dtype))
-
-        seed(state_x, grad_x)
-        seed(state_q, grad_q, quat=True)
-        seed(state_xd, grad_xd)
-        seed(state_omega, grad_omega)
-
-        ctx.tape.backward()
+        ro = ctx.rollout
+        if ro.generation != ctx.generation:
+            raise RuntimeError(
+                "warp engine: another rollout of the same shape ran between this "
+                "rollout's forward and backward and overwrote its tape buffers; "
+                "backpropagate each rollout before starting the next"
+            )
+        for seed, gr, quat in zip(ro.seed, (grad_x, grad_q, grad_xd, grad_omega),
+                                  (False, True, False, False)):
+            dst = wp.to_torch(seed)
+            if gr is None:
+                dst.zero_()
+            else:
+                dst.copy_(gr[..., [1, 2, 3, 0]] if quat else gr)  # WXYZ -> XYZW
+        _launch(ro.adjoint_graph, ro.device)
 
         def zero_nonfinite(g, name):
             global _WARNED_NONFINITE_GRAD
@@ -741,24 +715,24 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                 )
             return torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
 
-        def get_grad(name):
-            arr = ctx.wp_inputs[name]
-            if not (arr.requires_grad and arr.grad is not None):
+        def get_grad(arr, name, needed):
+            if not needed:
                 return None
             return zero_nonfinite(wp.to_torch(arr.grad).clone().detach(), name)
 
+        need = ctx.needs_input_grad
         init_x_grad = None
         if ctx.init_x_grad:
-            init_x_grad = zero_nonfinite(wp.to_torch(state_x.grad)[0].clone(), "init_x")
+            init_x_grad = zero_nonfinite(wp.to_torch(ro.state[0].grad)[0].clone(), "init_x")
         return (
             init_x_grad,  # init_x: through the clearance raise
             None,  # init_q
             None,  # init_xd
             None,  # init_omega
-            get_grad("ctrl"),
-            get_grad("z"),
-            get_grad("n"),
-            get_grad("kf"),
+            get_grad(ro.ctrl, "ctrl", need[4]),
+            get_grad(ro.z, "z", need[5]),
+            get_grad(ro.n, "n", need[6]),
+            get_grad(ro.kf, "kf", need[7]),
             None,  # stiffness: constant, not a gradient path
             None,  # wheel_centers_wp
             None,  # wheel_radii_wp
@@ -777,6 +751,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             None,  # ang_damping
             None,  # torque_limit
             None,  # com_transfer
+            None,  # with_grad
             None,  # device_str
         )
 
@@ -840,5 +815,8 @@ class WarpStaticEngine:
             engine_config.ang_damping,
             engine_config.torque_limit,
             1.0 if engine_config.com_transfer else 0.0,
+            # A rollout that will not be backpropagated (eval, no_grad) gets its own
+            # cached buffers, so it can never overwrite a pending training tape.
+            torch.is_grad_enabled(),
             str(self.device),
         )
