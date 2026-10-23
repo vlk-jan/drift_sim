@@ -81,7 +81,8 @@ class Simulator(torch.nn.Module):
         initial_state: Optional[dict] = None,
         T_horizon: Optional[float] = None,
     ):
-        """Roll out a trajectory with the fused Warp velocity-control kernel.
+        """Roll out a trajectory with the Warp engine: one kernel launch per
+        physics step, recorded on a wp.Tape (see simulator/engine_wp.py).
 
         Parameters
         ----------
