@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Tuple, Union
 
 import torch
@@ -198,7 +198,13 @@ CONTACT_STIFFNESS_V2 = 142_000.0  # N/m, measured tyre sag; see helhest_v2_robot
 # Median (height map - wheel-contact z) over driven cells of the paved Stromovka
 # training scenes 0000/0002 (4.3/3.8 cm; held-out 0001: 4.2), measured 2026-10-22
 # after the window-start fix: the lidar ground sits above axle - r on rigid ground.
+# This is the datum of the p90 maps of HELHEST v2.0-v2.4.
 HEIGHTMAP_DATUM_OFFSET_V2 = 0.040  # m
+# The same rule on HELHEST v2.5's median maps (2026-10-23): paved 0000-0002 incl.
+# held-out 0001, measured driven cells at 1-2 m, 4 s label horizon, contacts from
+# the scan pose: 3.24 cm (20 s block bootstrap 95 % CI 3.17-3.32, n 288,113 cells,
+# 175 blocks; per scene 3.01/3.42/3.23). The same rule gives 3.90 on v2.4.
+HEIGHTMAP_DATUM_OFFSET_V2_MEDIAN = 0.032  # m
 
 
 def helhest_v2_robot_model() -> "RobotModelConfig":
@@ -269,9 +275,25 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
     )
 
 
+def helhest_v2_median_robot_model() -> "RobotModelConfig":
+    """helhest_v2 on median-built height maps (HELHEST v2.5 on).
+
+    The robot is the same; only the height-map datum differs, because the lidar
+    ground a median map reads on rigid ground sits lower than a p90 map's. The
+    datum lives in the robot model so that the run record (robot +
+    robot_constants) pins it; datasets.helhest.robot_model_name_for_root picks
+    this model for a v2 root whose maps are median-built.
+    """
+    return replace(
+        helhest_v2_robot_model(),
+        heightmap_datum_offset=HEIGHTMAP_DATUM_OFFSET_V2_MEDIAN,
+    )
+
+
 ROBOT_MODELS = {
     "helhest": helhest_robot_model,
     "helhest_v2": helhest_v2_robot_model,
+    "helhest_v2_median": helhest_v2_median_robot_model,
 }
 
 
