@@ -163,31 +163,28 @@ def num_sim_steps(T_horizon, dt) -> int:
 
 # --- Robot models: the single source of truth for wheel geometry ---
 # Anything needing wheel positions/radii must call robot_model_config() rather
-# than restate numbers; stale copies once put contacts 0.2-0.4 m off the wheels.
+# than restate numbers: a stale copy puts contacts 0.2-0.4 m off the wheels.
 def helhest_robot_model() -> "RobotModelConfig":
     """Return HELHEST's wheel geometry and mass properties.
 
     WHEEL GEOMETRY IS THE URDF'S (`/robot_description`, latched in every bag).
     base_link is the front axle: front wheels (0, +-0.36), rear (-0.697, 0),
-    radius 0.36. Verified 2026-09-30 by reading the published URDF out of both
-    the 2025-09-12 v1 bag and the 2026-09-29 v2 bag: identical in both.
+    radius 0.36. The published URDF reads the same out of a v1 and a v2 bag.
 
-    MASS, COG AND INERTIA ARE NOT THE URDF'S, despite what this docstring
-    claimed until 2026-09-30. They arrived in commit "update robot config"
-    (2026-01-13) with no source recorded. The URDF's own links sum to 67.0 kg
-    with the centre of mass 0.171 m behind the front axle and inertia
-    diag ~(3.38, 4.04, 7.17); this model carries 93.8 kg, 0.255 m and
-    ~(8.65, 10.64, 19.29) -- 1.4x the mass and 2.6x the inertia.
+    MASS, COG AND INERTIA ARE NOT THE URDF'S, and their source is not recorded.
+    The URDF's own links sum to 67.0 kg with the centre of mass 0.171 m behind
+    the front axle and inertia diag ~(3.38, 4.04, 7.17); this model carries
+    93.8 kg, 0.255 m and ~(8.65, 10.64, 19.29) -- 1.4x the mass and 2.6x the
+    inertia.
 
-    THE MASS HERE IS THE RIGHT ONE. The user puts the robot at about 96 kg
-    (stated 2026-09-30), so 93.8 is within 2-3% and the URDF is 30% low --
-    unsurprising, since its inertias are exact uniform boxes and its battery is
-    2 kg. The COG and INERTIA remain unverified (issue 36 in docs/METHOD.md): a
-    weight does not fix either, and inertia enters the transient response the
-    trajectory loss scores.
+    THE MASS HERE IS THE RIGHT ONE. The robot weighs about 96 kg, so 93.8 is
+    within 2-3% and the URDF is 30% low -- unsurprising, since its inertias are
+    exact uniform boxes and its battery is 2 kg. The COG and INERTIA remain
+    unverified (issue 36 in docs/METHOD.md): a weight does not fix either, and
+    inertia enters the transient response the trajectory loss scores.
 
     THE URDF IS STALE IN OTHER RESPECTS, which is the reason not to adopt it
-    wholesale: the copy latched in the 2026-09-29 bag still declares an Ouster
+    wholesale: the copy latched in a v2 bag still declares an Ouster
     `os_sensor` and four e-CAM cameras, a sensor suite this robot does not
     carry. Its wheel radius is stale for the same reason -- see
     helhest_v2_robot_model.
@@ -209,36 +206,33 @@ def helhest_robot_model() -> "RobotModelConfig":
 
 CONTACT_STIFFNESS_V2 = 210_000.0  # N/m, top of the measured range; see helhest_v2_robot_model
 # Median (height map - wheel-contact z) over driven cells of the paved Stromovka
-# training scenes 0000/0002 (4.3/3.8 cm; held-out 0001: 4.2), measured 2026-10-22
-# after the window-start fix: the lidar ground sits above axle - r on rigid ground.
-# This is the datum of the p90 maps of HELHEST v2.0-v2.4.
+# training scenes 0000/0002 (4.3/3.8 cm; held-out 0001: 4.2): the lidar ground
+# sits above axle - r on rigid ground. This is the datum of the p90 maps of
+# HELHEST v2.0-v2.4.
 HEIGHTMAP_DATUM_OFFSET_V2 = 0.040  # m
-# The same rule on HELHEST v2.5's median maps (2026-10-23): paved 0000-0002 incl.
-# held-out 0001, measured driven cells at 1-2 m, 4 s label horizon, contacts from
-# the scan pose: 3.24 cm (20 s block bootstrap 95 % CI 3.17-3.32, n 288,113 cells,
+# The same rule on HELHEST v2.5's median maps: paved 0000-0002 incl. held-out
+# 0001, measured driven cells at 1-2 m, 4 s label horizon, contacts from the
+# scan pose: 3.24 cm (20 s block bootstrap 95 % CI 3.17-3.32, n 288,113 cells,
 # 175 blocks; per scene 3.01/3.42/3.23). The same rule gives 3.90 on v2.4.
 HEIGHTMAP_DATUM_OFFSET_V2_MEDIAN = 0.032  # m
 
 
 def helhest_v2_robot_model() -> "RobotModelConfig":
-    """Return HELHEST on the v2 rig (Odin1 + Fixposition), measured 2026-09-29.
+    """Return HELHEST on the v2 rig (Odin1 + Fixposition).
 
     Differs from helhest_robot_model() in the wheel RADIUS, which is 0.334 and
-    not the URDF's 0.36, and in the MASS: the v2 rig weighs 106 kg (user,
-    2026-10-22; the Odin1 + Fixposition fit is heavier than the Livox rig).
-    Inertia is scaled with the mass (same geometry assumed; where the extra
-    13 kg sits is not measured), cog is kept. Until 2026-10-22 only the radius
-    moved, so arms before that date simulated the v2 rig at 93.8 kg.
+    not the URDF's 0.36, and in the MASS: the v2 rig weighs 106 kg (the Odin1 +
+    Fixposition fit is heavier than the Livox rig). Inertia is scaled with the
+    mass (same geometry assumed; where the extra 13 kg sits is not measured),
+    cog is kept.
 
     WHEEL CENTRES are the URDF's and are trusted: `/robot_description` is a
-    latched topic in every v2 bag, and the 26-09-14, 26-09-22 and 26-09-28 bags
-    all give left (0, +0.36, 0), right (0, -0.36, 0), rear (-0.697, 0, 0).
+    latched topic in every v2 bag, and bags from three different days all give
+    left (0, +0.36, 0), right (0, -0.36, 0), rear (-0.697, 0, 0).
 
-    THE RADIUS IS NOT. The URDF says 0.36, but git history (helhest-common,
-    inside subtdata:/data/helhest/helhest-jr-workspaces.tar.gz) shows
-    `wheel_radius` was set to 0.36 on 2025-04-02 in commit 04daac0 and never
-    edited again -- 18 months before this rig existed. It is inherited, not
-    measured, and the user confirmed 2026-09-25 that the current wheels differ.
+    THE RADIUS IS NOT. The URDF's 0.36 is helhest-common's `wheel_radius`
+    (subtdata:/data/helhest/helhest-jr-workspaces.tar.gz), which predates this
+    rig and was never measured; the current wheels differ.
 
     0.334 is metres of ground per radian of `/joint_states` wheel rate, from two
     independent measurements on HELHEST_v2_0 agreeing to 0.5%: GT speed over
@@ -248,35 +242,35 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
     every figure is a lower bound. The URDF's 0.36 over-predicts the driven path
     by 10% -- 5396 m against 4899 m actual.
 
-    Caveat kept in view: this is the constant that maps a REPORTED joint rate to
-    ground travel, which is exactly what the rollout needs, since the trajectory
-    loss drives the simulator from `joint_states` and scores it against GT. It is
-    the PHYSICAL radius only if `/joint_states` is wheel-side; the rate reaches it
-    from the ODrive controllers via the ESP and no one has ruled out a gear or
-    encoder scale. The physical radius is separately indicated near 0.317 by the
-    lidar ground plane on the flat plaza.
+    This is the constant that maps a REPORTED joint rate to ground travel,
+    which is exactly what the rollout needs, since the trajectory loss drives
+    the simulator from `joint_states` and scores it against GT. It is the
+    PHYSICAL radius only if `/joint_states` is wheel-side (the rate reaches it
+    from the ODrive controllers via the ESP); the tyre measurement under
+    STIFFNESS shows it is. The lidar ground plane on the flat plaza separately
+    indicates a radius near 0.317.
 
-    STIFFNESS is measured (user, 2026-10-22, robot standing on flat floor vs
-    each wheel just lifted; axle height, cm): left 33.1/33.6, right 32.5/33.5,
-    rear 33.2/33.9 -> mean sag 7.3 mm (5-10 mm, one-hand lift), k = 106 * 9.81
-    / 0.0073 = 1.42e5 N/m (1.0e5-2.1e5). Same probe: xy identical across
-    1.0e5-4e5; |z| 2.93 cm vs 2.70 at the old 4e5 guess.
-    SET TO 2.1e5 (2026-10-24), the top of that range (sag 4.9 mm): with 32 rim
-    points the 6.4 mm neighbours touch inside a 7.3 mm sag, the wider patch adds
-    scrub and the sim under-turns more. Re-tuned with damping_alpha 2.0 on the
-    v2.5 fidelity windows (rigid 0000/0002-0006, rough 0021-0023/0028-0033,
-    held-out 0001; mu <= 1.0) against the 16-point engine at 1.42e5 / 1.0: xy
-    ties on rigid and rough, held-out xy -0.2 mm, |z| -1.7 to -2.7 mm, held-out
-    yaw +0.03 deg. The constants were picked on those same windows. These
-    figures are from contact law v1, the uncapped damping before the 2026-10-24
-    per-point cap; the fidelity windows are to be re-run under the capped law.
+    STIFFNESS is measured (robot standing on flat floor vs each wheel just
+    lifted; axle height, cm): left 33.1/33.6, right 32.5/33.5, rear 33.2/33.9
+    -> mean sag 7.3 mm (5-10 mm, one-hand lift), k = 106 * 9.81 / 0.0073 =
+    1.42e5 N/m (1.0e5-2.1e5). Same probe: xy identical across 1.0e5-4e5; |z|
+    2.93 cm vs 2.70 at 4e5.
+    SET TO 2.1e5, the top of that range (sag 4.9 mm): with 32 rim points the
+    6.4 mm neighbours touch inside a 7.3 mm sag, the wider patch adds scrub and
+    the sim under-turns more. Tuned with damping_alpha 2.0 on the v2.5 fidelity
+    windows (rigid 0000/0002-0006, rough 0021-0023/0028-0033, held-out 0001;
+    mu <= 1.0) against the 16-point engine at 1.42e5 / 1.0: xy ties on rigid
+    and rough, held-out xy -0.2 mm, |z| -1.7 to -2.7 mm, held-out yaw
+    +0.03 deg. The constants were picked on those same windows. These figures
+    are from contact law v1 (uncapped damping); the fidelity windows are to be
+    re-run under the capped law.
     The same numbers confirm the RADIUS as physical: mean free radius 0.337,
     loaded 0.329, and the rolling radius of a pneumatic tyre r_free - sag/3 =
     0.334 -- so /joint_states is wheel-side, no gear or encoder scale.
 
-    SENSITIVITY (2026-10-22, scripts/analysis/probe_robot_constants.py: rigid GT
-    support, constant mu, 512 windows of the made-surface TRAINING scenes
-    0000/0002-0006 of HELHEST_v2_4, mean xy error over 0.5-2 s; baseline 3.58 cm):
+    SENSITIVITY (scripts/analysis/probe_robot_constants.py: rigid GT support,
+    constant mu, 512 windows of the made-surface TRAINING scenes 0000/0002-0006
+    of HELHEST_v2_4, mean xy error over 0.5-2 s; baseline 3.58 cm):
     radius is sharp and 0.334 is the optimum (0.325 +0.5 cm, 0.345 +1.3 cm, 0.36
     +4.3 cm); cog x -0.255 is the optimum (URDF -0.171 +0.1 cm, +-0.1 m +0.5 to
     +0.9 cm); inertia x0.75-x2 within 0.1 cm (x0.5 +0.4 cm), so the mass-scaled
@@ -347,8 +341,8 @@ class PhysicsEngineConfig:
             slip_floor_velocity) at which the tangential force reaches ~76% of
             mu * F_N, via tanh(s / slip_ref_ratio). Default 0.1.
         slip_floor_velocity (float): floor (m/s) on the rolling speed in the
-            slip-ratio denominator, so a stopped wheel reduces to the old
-            velocity law s = |v_t| / slip_floor_velocity. Default 0.05.
+            slip-ratio denominator, so a stopped wheel reduces to the velocity
+            form s = |v_t| / slip_floor_velocity. Default 0.05.
         Changing either changes the dynamics; trajectory metrics are not
         comparable across values.
     """
@@ -358,15 +352,15 @@ class PhysicsEngineConfig:
     dt: float = 2e-3
     g: float = 9.81
     torque_limit: float = 5000.0
-    # 2.0 since 2026-10-24, re-tuned with the 32-point engine and the v2 stiffness
-    # 2.1e5 (helhest_v2_robot_model); 1.0 before.
+    # Tuned jointly with the 32-point engine and the v2 stiffness 2.1e5
+    # (helhest_v2_robot_model).
     damping_alpha: float = 2.0
     ang_damping: float = 0.1
-    # Slip RATIO law (since 2026-10-22): |F_t| = mu F_N tanh(s / slip_ref_ratio),
-    # s = |v_t| / max(|omega_w| r_w, slip_floor_velocity). With the old absolute
-    # slip speed (tanh(|v_t| / 0.1)) only mu / v_ref was identifiable below
-    # saturation and the fitted global optimum sat at ~1.6 against a head ceiling
-    # of 1.0. In slip ratio, mu is the peak traction coefficient: tyres peak at
+    # Slip RATIO law: |F_t| = mu F_N tanh(s / slip_ref_ratio),
+    # s = |v_t| / max(|omega_w| r_w, slip_floor_velocity). With an absolute slip
+    # speed (tanh(|v_t| / 0.1)) only mu / v_ref is identifiable below saturation
+    # and the fitted global optimum sits at ~1.6 against a head ceiling of 1.0.
+    # In slip ratio, mu is the peak traction coefficient: tyres peak at
     # 10-20 % slip (Pacejka), so 0.1 puts ~76 % of mu at s = 0.1 and saturation
     # by s ~ 0.3.
     slip_ref_ratio: float = 0.1
@@ -375,7 +369,7 @@ class PhysicsEngineConfig:
     slip_floor_velocity: float = 0.05
     # state.x is the body origin (front axle), not the CoM (|r| = 0.255 m on
     # helhest). On = the correct rigid-body dynamics (alpha x r and
-    # omega x (omega x r) terms); checkpoints before 2026-10-22 trained with it off.
+    # omega x (omega x r) terms).
     com_transfer: bool = True
 
 
@@ -497,7 +491,8 @@ def find_init_rob_position(
         q_new = torch.cat([denom * 0.5, v_cross / denom], dim=1)
         q_new = q_new / (q_new.norm(dim=1, keepdim=True) + 1e-6)
         # Only the antiparallel case is singular; at c -> 1 the formula above
-        # tends to identity on its own (guarding |c| snapped slopes < 0.81 deg flat).
+        # tends to identity on its own (a guard on |c| would snap slopes
+        # < 0.81 deg flat).
         q_new = torch.where((c < -1.0 + 1e-4).expand_as(q_new), q_flip, q_new)
 
         # z_body = target_z - (R_new @ wc_body)_z per wheel; the max keeps every
@@ -526,8 +521,9 @@ def raise_to_clearance(engine, x, q, world_config):
     A vertical lift leaves every point's xy, so the exact lift is the largest
     vertical gap terrain_z - point_z (dh / nz), in one step. Differentiable in
     the terrain: the start height is a function of the support under the
-    deepest point, and a detached lift made the support gradient disagree with
-    finite differences (cos 0.98 -> 1.000 at 2 s, rough ground, GT-seeded start).
+    deepest point, and a detached lift makes the support gradient disagree with
+    finite differences (cos 0.98 instead of 1.000 at 2 s, rough ground,
+    GT-seeded start).
     The attitude is not differentiated (see Simulator.fit_plane_pose). `engine`
     only supplies geometry, so both simulator wrappers share this.
     """
@@ -753,15 +749,10 @@ WHEEL_VISUAL_WIDTH = 0.142  # tyre width, visual only -- no dynamics reads it
 # -0.477) and up to the front sensor face (+0.10..+0.17).
 #
 # NOT the URDF's base_link box, which is `0.26 0.6 0.18` at xyz `-0.047 0 0`
-# (/robot_description, identical in the 2025-09-12 v1 bag and the 2026-09-29 v2
-# bag). That box is the frame member alone; it leaves out the motors, the
-# battery and the wheel forks, so it draws a machine a quarter the length of
-# the real one. Half-extents here, as SimView wants; the URDF quotes full
-# extents.
-#
-# Until 2026-09-30 this was hx=0.5, hy=0.3, hz=0.15 centred on base_link: a
-# 1.00 x 0.60 x 0.30 m slab reaching 0.5 m ahead of the front axle and stopping
-# 0.2 m short of the rear wheel, which is what made the robot look wrong.
+# (/robot_description, identical in the v1 and v2 bags). That box is the frame
+# member alone; it leaves out the motors, the battery and the wheel forks, so it
+# draws a machine a quarter the length of the real one. Half-extents here, as
+# SimView wants; the URDF quotes full extents.
 HELHEST_CHASSIS = {"hx": 0.35, "hy": 0.25, "hz": 0.15}
 HELHEST_CHASSIS_CENTER = (-0.15, 0.0, 0.0)
 

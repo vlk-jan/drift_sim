@@ -516,10 +516,11 @@ class _Rollout:
     """Persistent buffers and two captured graphs (forward, adjoint) for one shape.
 
     The rollout is ~1000 tiny launches per call (4 kernels x steps, and as many
-    adjoints) and was CPU-launch-bound: ~95 ms wall for ~30 ms of GPU work at
-    B*n = 128 x 125 steps. Captured once per shape and constants, a call is a
-    copy into these buffers plus one graph launch each way. Same kernels in the
-    same order, so the same numbers as launching them one by one.
+    adjoints); launched one by one they are CPU-launch-bound: ~95 ms wall for
+    ~30 ms of GPU work at B*n = 128 x 125 steps. Captured once per shape and
+    constants, a call is a copy into these buffers plus one graph launch each
+    way. Same kernels in the same order, so the same numbers as launching them
+    one by one.
     """
 
     def __init__(self, B, num_steps, H, W, device, consts):
@@ -604,8 +605,8 @@ def _launch(graph, device):
     stream both ways by events: after the torch copies into the buffers, before
     torch reads the outputs. Explicit, so it does not rest on warp's stream
     synchronising implicitly with torch's legacy default stream. (Replaying on
-    torch's stream itself gave wrong adjoints, 2026-10-23.) Each DDP rank is its
-    own process with its own cache."""
+    torch's stream itself gives wrong adjoints.) Each DDP rank is its own
+    process with its own cache."""
     if not device.is_cuda:
         wp.capture_launch(graph)
         return

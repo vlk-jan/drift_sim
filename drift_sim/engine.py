@@ -135,8 +135,8 @@ class DPhysicsEngine(torch.nn.Module):
         Each wheel is a spring of k / n_wheels on its DEEPEST point's depth D,
         shared over its penetrating points by depth (point i carries
         d_i D / sum d): flat ground gives the whole-robot k (sag m g / k) at any
-        point count. Summing a k / n_wheels spring per point instead stiffened the
-        wheel with every extra rim point under the sag (at 32 points the
+        point count. Summing a k / n_wheels spring per point instead would stiffen
+        the wheel with every extra rim point under the sag (at 32 points the
         neighbours sit 6.4 mm up, inside v2's measured 7.3 mm sag; its simulated
         rest sag, m g / k at k 2.1e5, is 4.95 mm). A point starts touching at
         zero share, so the force stays continuous.
@@ -146,10 +146,10 @@ class DPhysicsEngine(torch.nn.Module):
         lam = b k / (m g), b = alpha 2 sqrt(m k): uncapped, the robot's total is
         b, alpha times critical heave damping, at the rest sag depth m g / k
         only, and zero at zero depth, as for a real tyre with no deflection. A
-        depth-independent b v_n made the force jump by b |v_n| / n_wheels at
+        depth-independent b v_n makes the force jump by b |v_n| / n_wheels at
         every touchdown, which the analytic gradient cannot see: support
-        gradients came out 5-35 % low and, from a seated start on rough ground,
-        pointed the wrong way (cos -0.28 at 0.25 s).
+        gradients come out 5-35 % low and, from a seated start on rough ground,
+        point the wrong way (cos -0.28 at 0.25 s).
 
         c is capped per point at share m_eff_n / dt, so the damping impulse can
         at most stop the point's normal velocity through its normal effective
@@ -355,7 +355,7 @@ class DPhysicsEngine(torch.nn.Module):
 
         Coulomb friction can stop a slip but never reverse it. Near rest the law's
         slope mu F_N / (slip_ref_ratio slip_floor) is ~3x what explicit Euler
-        integrates at dt 2e-3, so uncut it chatters (a stopped robot drifted
+        integrates at dt 2e-3, so uncut it chatters (a stopped robot drifts
         ~1.8 mm / 0.5 s forever). Predict each point's tangential velocity at the
         end of the step under ALL forces (springs, gravity, every contact's
         friction); where it points against the slip, cap the point at the
@@ -365,7 +365,7 @@ class DPhysicsEngine(torch.nn.Module):
         contacts by penetration depth (shares sum to 1, so the joint impulse
         cannot overshoot). Sustained sliding under drive torque (the dragged
         wheel of a pivot turn) does not reverse and follows the law; gating the
-        cap on the slip ratio instead clipped it (always on) or let stopping
+        cap on the slip ratio instead would clip it (always on) or let stopping
         wheels chatter (slip < slip_ref_ratio).
         Pinned by tests/test_engine_invariants.py.
         """
@@ -396,7 +396,7 @@ class DPhysicsEngine(torch.nn.Module):
 
         # state.x is the body origin (front axle), not the CoM, so
         # a_origin = a_com - alpha x r - omega x (omega x r), r = R @ cog.
-        # On by default; checkpoints before 2026-10-22 trained without it.
+        # On by default.
         if self.config.com_transfer:
             xdd = (
                 xdd_com
