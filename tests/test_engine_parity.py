@@ -452,6 +452,39 @@ def test_gradient_matches_finite_differences(engine, robot, terrain):
     assert max(rels) < FD_REL_TOL[terrain], f"{engine} {robot} {terrain}: rel errors {rels}"
 
 
+def _off_map_rollout(engine):
+    """3 s from the centre of a 3.2 m map of 3 cm noise, so every edge cell is
+    tilted: the robot drives off the +x edge (the audit's H2 probe)."""
+    n, t_horizon = 32, 3.0
+    mc = (n - 1) * RES / 2
+    sim = _make_sim_factory(t_horizon, DT_TRAIN, engine=engine, device=DEVICE,
+                            max_coord=mc, eval_mode=False, robot="helhest_v2")
+    g = torch.Generator().manual_seed(3)
+    support = (0.03 * torch.randn(1, n, n, generator=g)).to(DEVICE).requires_grad_(True)
+    friction = torch.full((1, n, n), 0.7, device=DEVICE)
+    ctrl = torch.tensor([[[3.0, 2.4, 3.0]] * 2], device=DEVICE)
+    ctrl_ts = torch.tensor([[0.0, t_horizon]], device=DEVICE, dtype=torch.float64)
+    traj, _, _, _ = sim.predict_trajectory(
+        {"support": support, "friction": friction}, ctrl, ctrl_ts
+    )
+    traj[:, :, :3, 3].pow(2).sum().backward()
+    return traj[0, :, :3, 3].detach(), support.grad, mc
+
+
+def test_off_map_rollout_matches_torch_and_stays_bounded():
+    """Off the map both engines extend the edge height flat under a vertical
+    normal. The edge cell's tilted normal there pushed sideways forever: a
+    non-conservative force, support gradient 1e28 here before the damping cap."""
+    pos_t, g_t, mc = _off_map_rollout("torch")
+    pos_w, g_w, _ = _off_map_rollout("warp")
+    off = (pos_t[:, 0] > mc).float().mean().item()
+    assert off > 0.3, f"origin off the map on only {off:.0%} of steps"
+    err = (pos_w - pos_t).norm(dim=-1).max().item()
+    assert err < POS_ATOL, f"off-map poses diverged by {err:.3e} m"
+    for name, g in (("torch", g_t), ("warp", g_w)):
+        assert torch.isfinite(g).all() and g.norm() < 2e4, (name, g.norm().item())
+
+
 @pytest.mark.parametrize("engine", ["torch", "warp"])
 def test_stiffness_takes_no_gradient(engine):
     """Stiffness is the robot's tyre constant: neither engine differentiates it.

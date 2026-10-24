@@ -84,7 +84,12 @@ def sample_normal_bilinear(
     width: int,
     height: int,
 ):
-    """Bilinearly sample a normal field, renormalized after interpolation."""
+    """Bilinearly sample a normal field, renormalized after interpolation.
+
+    Vertical off the map, where the border height extends flat (simulator/
+    engine.py::_sample_terrain)."""
+    if u < 0.0 or u > float(width - 1) or v < 0.0 or v > float(height - 1):
+        return wp.vec3(0.0, 0.0, 1.0)
     u0 = int(wp.floor(u))
     v0 = int(wp.floor(v))
     w_u = u - float(u0)

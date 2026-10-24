@@ -74,7 +74,8 @@ class DPhysicsEngine(torch.nn.Module):
 
         Uses the precomputed 6-channel ``world_config._sample_grid``
         (z, nx, ny, nz, friction, stiffness). Points off the map read the border
-        cell, so a rollout leaving the grid continues on the edge height silently.
+        cell under a vertical normal, so a rollout leaving the grid continues on
+        the edge height silently.
 
         Args:
             wheel_points:  (B, W, P, 3) world-frame positions of wheel sample points
@@ -109,6 +110,10 @@ class DPhysicsEngine(torch.nn.Module):
 
         # Bilinear interpolation denormalizes the normals.
         normals = F.normalize(normals, dim=-1, eps=1e-6)
+        # Vertical off the map, where the border height extends flat: the edge
+        # cell's tilted normal there pushed sideways forever (non-conservative).
+        off_map = (xy.abs() > world_config.max_coord).any(dim=-1, keepdim=True)
+        normals = torch.where(off_map, normals.new_tensor([0.0, 0.0, 1.0]), normals)
 
         # Penetration depth: vertical gap scaled by the normal's z component.
         dh = (wheel_points[..., 2:3] - z_terrain) * normals[..., 2:3]  # (B, W, P, 1)
