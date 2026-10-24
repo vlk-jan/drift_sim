@@ -163,8 +163,9 @@ class DPhysicsEngine(torch.nn.Module):
         (m_eff_n ~35 kg). Local, no solve, and still zero at zero depth: the
         force is continuous in the terrain, so `in_contact` only masks.
         """
-        # The robot's tyre constant, not a gradient path (warp has none either).
-        k = stiffness.detach().unsqueeze(-1)  # (B, W, P, 1)
+        # The input stiffness grid takes no gradient (WorldConfig detaches it); the
+        # sampled stiffness still varies with contact position, as in warp.
+        k = stiffness.unsqueeze(-1)  # (B, W, P, 1)
         b = self.config.damping_alpha * 2 * (self._mass * k) ** 0.5
         lam = b * k / (self._mass * self.config.g)
         n_wheels = self._wheel_radii.shape[0]

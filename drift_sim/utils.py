@@ -94,7 +94,8 @@ class WorldConfig:
                 self.z_grid, self.k_stiffness, dtype=torch.float32
             )
         else:
-            self.k_stiffness = self.k_stiffness.to(torch.float32)
+            # The robot's tyre constant: no gradient into the grid (both engines).
+            self.k_stiffness = self.k_stiffness.to(torch.float32).detach()
 
         # One 6-channel grid [z, nx, ny, nz, friction, stiffness] for a single
         # grid_sample per step.

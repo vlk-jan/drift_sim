@@ -500,6 +500,30 @@ def test_stiffness_takes_no_gradient(engine):
     assert k.grad is None or not k.grad.any(), f"{engine}: stiffness took a gradient"
 
 
+def test_gradients_match_torch_on_a_stiffness_ramp():
+    """Only the input stiffness grid takes no gradient: the sampled stiffness
+    still varies with contact position, and both engines differentiate that.
+
+    Detaching it in torch gave a relative difference of 6.9e-3 here (CPU; under
+    1e-2 on every ramp tried, hence 1e-3); 2e-6 without.
+    """
+    t_horizon = 100 * DT_TRAIN
+    xs = torch.linspace(-MAX_COORD, MAX_COORD, GRID_N, device=DEVICE)
+    k = 2.1e5 * torch.exp(2.0 * xs).expand(1, GRID_N, GRID_N)  # e-fold per 0.5 m in x
+    grads = []
+    for engine in ("torch", "warp"):
+        support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon, dt=DT_TRAIN)
+        sim = _make_sim(engine, t_horizon, dt=DT_TRAIN, robot="helhest_v2")
+        traj, _, _, _ = sim.predict_trajectory(
+            {"support": support, "friction": friction, "stiffness": k}, ctrl, ctrl_ts
+        )
+        traj[:, :, :3, 3].pow(2).sum().backward()
+        grads.append(support.grad)
+    gt, gw = grads
+    rel = ((gw - gt).norm() / gt.norm()).item()
+    assert _cos(gw, gt) > 0.9999 and rel < 1e-3, (_cos(gw, gt), rel)
+
+
 def test_both_wrappers_share_one_default_horizon():
     """Both wrappers must share one T_horizon default.
 

@@ -762,7 +762,9 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             get_grad(ro.z, need[5]),
             get_grad(ro.n, need[6]),
             get_grad(ro.kf, need[7]),
-            None,  # stiffness: constant, not a gradient path
+            # The input stiffness grid takes no gradient; the sampled stiffness
+            # still varies with contact position.
+            None,  # stiffness
             None,  # wheel_centers_wp
             None,  # wheel_radii_wp
             None,  # inertia_wp
