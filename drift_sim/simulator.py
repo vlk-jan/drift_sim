@@ -77,8 +77,9 @@ class Simulator(torch.nn.Module):
     ):
         """Differentiable torch simulator wrapper.
 
-        T_horizon must match the warp wrapper and train.py's --t_horizon default:
-        the trainer's single-segment path passes no horizon.
+        T_horizon is the rollout length when predict_trajectory is given none (the
+        eval paths build the wrapper with --t_horizon; the trainer always passes
+        its segment horizon). The 1.0 s default matches the warp wrapper's.
         """
         super().__init__()
 
@@ -230,8 +231,13 @@ class Simulator(torch.nn.Module):
         transformations : torch.Tensor
             Robot poses, (B, SimSteps, 4, 4).
         timestamps : torch.Tensor
-            (B, SimSteps). Pose i is the post-step state stamped at the step's
-            end, so the first stamp is vel_ts[b, 0] + dt (same as the warp wrapper).
+            float64, (B, SimSteps). Pose i is the post-step state stamped at the
+            step's end, so the first stamp is vel_ts[b, 0] + dt (same as the warp
+            wrapper).
+        xd_out : torch.Tensor
+            Linear velocity, (B, SimSteps, 3).
+        omega_out : torch.Tensor
+            Angular velocity, (B, SimSteps, 3).
         """
         actual_bs = vel_ctrl.shape[0]
 
