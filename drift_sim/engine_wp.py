@@ -274,13 +274,17 @@ def contact_point(
         r_x_n, wp.quat_rotate(q, inertia_body_inv * wp.quat_rotate_inv(q, r_x_n))
     )
     share = -dist / wp.max(depth_sum[step, b], 1.0e-12)
-    damping_unlimited = depth * lam * wp.abs(vn) / float(NUM_WHEELS)
-    damping_limit = share * wp.abs(vn) / (dt * inv_m_eff_n)
-    damping = wp.min(damping_unlimited, damping_limit)
-    # Oppose vn: subtract positive damping when expanding (vn > 0), add it
-    # when compressing (vn < 0), matching torch.sign in engine.py.
-    if vn < 0.0:
-        damping = -damping
+    # Zero with a zero adjoint at vn == 0 (a start at rest), as torch's
+    # abs'(0) = sign(0) = 0; warp's abs and min adjoints are not zero there.
+    damping = 0.0
+    if vn != 0.0:
+        damping_unlimited = depth * lam * wp.abs(vn) / float(NUM_WHEELS)
+        damping_limit = share * wp.abs(vn) / (dt * inv_m_eff_n)
+        damping = wp.min(damping_unlimited, damping_limit)
+        # Oppose vn: subtract positive damping when expanding (vn > 0), add it
+        # when compressing (vn < 0), matching torch.sign in engine.py.
+        if vn < 0.0:
+            damping = -damping
     f_mag = wp.max(depth * k_s / float(NUM_WHEELS) - damping, 0.0)
     F_spring = n_surf * f_mag
 

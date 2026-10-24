@@ -337,6 +337,37 @@ def test_initial_state_gradients_match_torch():
         assert lo < _ratio(gw, gt) < hi, (name, _ratio(gw, gt))
 
 
+def test_rest_start_gradients_match_torch():
+    """Seeded at rest at its rest sag, the robot's v_n is exactly 0 on step 0,
+    where the damping and its adjoint are 0 in both engines (torch: abs'(0) =
+    sign(0) = 0). Warp's abs and min adjoints gave dF/dv_n = -share m_eff_n / dt
+    there: the init xd gradient came out x0.45. The wheels spin, so the slip is
+    not 0 (where torch's |v| and warp's sqrt(|v|^2 + 1e-12) still differ).
+    """
+    t_horizon = 5 * DT_TRAIN
+    support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon, dt=DT_TRAIN)
+    props = {"support": support.detach(), "friction": friction.detach()}
+    grads = {}
+    for engine in ("torch", "warp"):
+        sim = _make_sim(engine, t_horizon, dt=DT_TRAIN, robot="helhest_v2")
+        sim.raise_to_clearance = lambda x, q, wc: x  # keep the sag
+        rm = sim.robot_model
+        z_rest = float(rm.wheel_radii[0]) - rm.mass * 9.81 / rm.contact_stiffness
+        init = {
+            "x": torch.tensor([[0.0, 0.0, z_rest]], device=DEVICE),
+            "q": torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=DEVICE),
+            "xd": torch.zeros(1, 3, device=DEVICE, requires_grad=True),
+            "omega": torch.zeros(1, 3, device=DEVICE, requires_grad=True),
+        }
+        traj, _, _, _ = sim.predict_trajectory(props, ctrl, ctrl_ts, initial_state=init)
+        traj[:, :, :3, 3].pow(2).sum().backward()
+        grads[engine] = (init["xd"].grad, init["omega"].grad)
+    for name, gt, gw in zip(("xd", "omega"), grads["torch"], grads["warp"]):
+        assert _cos(gw, gt) > GRAD_COS_MIN, (name, _cos(gw, gt))
+        lo, hi = GRAD_RATIO_RANGE
+        assert lo < _ratio(gw, gt) < hi, (name, _ratio(gw, gt))
+
+
 @pytest.mark.parametrize("engine", ["torch", "warp"])
 def test_returned_timestamps_survive_epoch_scale_input(engine):
     """Predicted timestamps must resolve a 1 s window sitting at Unix-epoch scale.
