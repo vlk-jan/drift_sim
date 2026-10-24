@@ -6,7 +6,8 @@ normal), ~10x cheaper per rollout. Keep the engines formula-for-formula
 identical: tests/test_engine_parity.py checks forward poses and gradients
 between them.
 
-The rollout is one kernel launch per timestep on a wp.Tape, with state in
+The rollout is four kernel launches per timestep on a wp.Tape, captured once
+per shape into a graph that each call replays (_Rollout), with state in
 step-indexed arrays (`state_x[step]`, ...), and contact points are threads
 (`dim=(B, NUM_WHEELS, NUM_WHEEL_POINTS)`). Warp only unrolls loops with
 compile-time `range()` bounds; a dynamic loop that mutates state falls back to
@@ -599,7 +600,8 @@ class _Rollout:
                 wp.copy(s.grad[1:], sd)
             self.tape.backward()
         self.adjoint_graph = cap.graph
-        # The buffer zeroing above ran on warp's stream; replays run on torch's.
+        # The allocations above zero-filled on warp's stream; torch copies the
+        # inputs in on its own (WarpTrajectoryFunc.forward).
         wp.synchronize_device(device)
 
 
@@ -620,8 +622,9 @@ def _launch(graph, device):
 
 
 # Rollouts by (shape, constants); a few shapes at most (train, val, a last batch).
+# Each keeps its own grids and gradients: ~0.1 GB at B 128 on a 128 x 128 map.
 _ROLLOUTS: dict = {}
-_MAX_ROLLOUTS = 4
+_MAX_ROLLOUTS = 8
 
 
 def _get_rollout(B, num_steps, H, W, device, consts, with_grad):
@@ -783,7 +786,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
 
 class WarpStaticEngine:
-    """Hold the robot constants; state and scratch are allocated per rollout."""
+    """Hold the robot constants; state and scratch buffers are cached per shape
+    (_get_rollout)."""
 
     def __init__(
         self,
