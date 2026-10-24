@@ -23,6 +23,7 @@ import torch
 import warp as wp
 
 from simulator.engine import NUM_WHEEL_POINTS as _NUM_WHEEL_POINTS
+from simulator.engine import SLIP_DIR_GRAD_EPS as _SLIP_DIR_GRAD_EPS
 
 wp.init()
 
@@ -30,6 +31,8 @@ wp.init()
 # parameters (see module docstring).
 NUM_WHEELS = wp.constant(3)
 NUM_WHEEL_POINTS = wp.constant(_NUM_WHEEL_POINTS)
+# Bound on the slip direction's derivative near rest (see simulator/engine.py).
+SLIP_DIR_GRAD_EPS = wp.constant(_SLIP_DIR_GRAD_EPS)
 
 
 # --- Helper math (device functions) ---
@@ -189,6 +192,23 @@ def depth_sum_kernel(
 
 
 @wp.func
+def slip_direction(v_slip: wp.vec3, v_mag: float) -> wp.vec3:
+    """Unit slip direction with a bounded derivative (simulator/engine.py
+    ::_SlipDirection)."""
+    return v_slip / (v_mag + 1.0e-6)
+
+
+@wp.func_grad(slip_direction)
+def adj_slip_direction(v_slip: wp.vec3, v_mag: float, adj_ret: wp.vec3):
+    d = wp.max(v_mag, SLIP_DIR_GRAD_EPS)
+    if v_mag > SLIP_DIR_GRAD_EPS:
+        radial = wp.dot(adj_ret, v_slip)
+        wp.adjoint[v_slip] += adj_ret / d - v_slip * radial / (d * d * d)
+    else:
+        wp.adjoint[v_slip] += adj_ret / d
+
+
+@wp.func
 def contact_point(
     step: int,
     b: int,
@@ -284,7 +304,7 @@ def contact_point(
     g_t = wp.vec3(0.0, 0.0, -gravity) + (gravity * n_surf[2]) * n_surf
     v_slip = v_tangential + g_t * dt
     v_mag = wp.sqrt(wp.dot(v_slip, v_slip) + 1.0e-12)
-    v_dir = v_slip / (v_mag + 1.0e-6)
+    v_dir = slip_direction(v_slip, v_mag)
 
     F_N = wp.max(wp.dot(F_spring, n_surf), 0.0)
     # Slip ratio s = |v_t| / max(|omega_w| r_w, floor) (see simulator/engine.py).

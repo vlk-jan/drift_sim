@@ -19,6 +19,31 @@ NUM_WHEEL_POINTS = 32
 # to how contact forces are computed: run records store it (utils.misc.
 # robot_constants), and checkpoints from another law are refused for scoring.
 CONTACT_LAW = "wheel-deepest-point-v2"
+# Slip speed (m/s) below which the slip direction's derivative is bounded at 1 / eps,
+# exact above: near rest the exact ~1 / |v| through the friction cap, which flips
+# branch every step, is one-sided and huge (tests/test_low_slip_gradient.py).
+SLIP_DIR_GRAD_EPS = 2e-2
+
+
+class _SlipDirection(torch.autograd.Function):
+    """v / (|v| + 1e-6), backpropagated through the Jacobian of v / |v| above
+    SLIP_DIR_GRAD_EPS and through I / SLIP_DIR_GRAD_EPS below it; all of it goes
+    to v_slip, none to v_mag."""
+
+    @staticmethod
+    def forward(ctx, v_slip, v_mag):
+        ctx.save_for_backward(v_slip, v_mag)
+        return v_slip / (v_mag + 1e-6)
+
+    @staticmethod
+    def backward(ctx, grad):
+        v_slip, v_mag = ctx.saved_tensors
+        d = v_mag.clamp_min(SLIP_DIR_GRAD_EPS)
+        radial = torch.where(
+            v_mag > SLIP_DIR_GRAD_EPS, (grad * v_slip).sum(dim=-1, keepdim=True), 0.0
+        )
+        return grad / d - v_slip * radial / d.pow(3), None
+
 
 # --- Rigid-body model ---
 # COG and wheel triangle are parameters; contact forces do not spin the wheels
@@ -274,7 +299,7 @@ class DPhysicsEngine(torch.nn.Module):
         g_t = g_t - (g_t * normals).sum(dim=-1, keepdim=True) * normals
         v_slip = v_tangential + g_t * self.config.dt
         v_mag = torch.norm(v_slip, dim=-1, keepdim=True)
-        v_dir = v_slip / (v_mag + 1e-6)
+        v_dir = _SlipDirection.apply(v_slip, v_mag)
 
         # F = mu * F_N * tanh(s / slip_ref_ratio) with the slip ratio
         # s = |v_t| / max(|omega_w| r_w, slip_floor_velocity): mu is the peak
