@@ -49,6 +49,7 @@ class DPhysicsEngine(torch.nn.Module):
             [0.0, 0.0, -self._mass * self.config.g],
         ).unsqueeze(0)
         self.register_buffer("_F_g", F_g)
+        self.register_buffer("_up", torch.tensor([0.0, 0.0, 1.0]))
 
     def _precompute_wheel_points(self, n_points: int) -> torch.Tensor:
         """Precompute wheel points relative to wheel centers."""
@@ -113,7 +114,7 @@ class DPhysicsEngine(torch.nn.Module):
         # Vertical off the map, where the border height extends flat: the edge
         # cell's tilted normal there pushed sideways forever (non-conservative).
         off_map = (xy.abs() > world_config.max_coord).any(dim=-1, keepdim=True)
-        normals = torch.where(off_map, normals.new_tensor([0.0, 0.0, 1.0]), normals)
+        normals = torch.where(off_map, self._up, normals)
 
         # Penetration depth: vertical gap scaled by the normal's z component.
         dh = (wheel_points[..., 2:3] - z_terrain) * normals[..., 2:3]  # (B, W, P, 1)
