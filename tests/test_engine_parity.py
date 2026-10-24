@@ -4,7 +4,8 @@ A dynamic loop in a Warp kernel gets an adjoint built on end-of-loop values:
 the forward still agreed while support gradients went to cosine ~0 at 100 steps
 and NaN at 1000. So gradients are checked at full rollout length, both engines
 are cross-checked against finite differences, and the loop construct is banned
-statically. Stiffness is not covered: it is only a simulator input now.
+statically. Stiffness takes no gradient in either engine: it is only a simulator
+input now.
 """
 
 import pytest
@@ -449,6 +450,21 @@ def test_gradient_matches_finite_differences(engine, robot, terrain):
     rels = _fd_rel_errors(engine, robot, terrain)
     assert rels, "no cell carried gradient — the test verified nothing"
     assert max(rels) < FD_REL_TOL[terrain], f"{engine} {robot} {terrain}: rel errors {rels}"
+
+
+@pytest.mark.parametrize("engine", ["torch", "warp"])
+def test_stiffness_takes_no_gradient(engine):
+    """Stiffness is the robot's tyre constant: neither engine differentiates it.
+    Torch did, through k and lam, while warp returned None."""
+    t_horizon = 100 * DT
+    support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon)
+    k = torch.full_like(support, 2.1e5, requires_grad=True)
+    traj, _, _, _ = _make_sim(engine, t_horizon).predict_trajectory(
+        {"support": support, "friction": friction, "stiffness": k}, ctrl, ctrl_ts
+    )
+    traj[:, :, :3, 3].pow(2).sum().backward()
+    assert support.grad.norm() > 0, "nothing was backpropagated"
+    assert k.grad is None or not k.grad.any(), f"{engine}: stiffness took a gradient"
 
 
 def test_both_wrappers_share_one_default_horizon():
