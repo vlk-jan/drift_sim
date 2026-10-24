@@ -64,7 +64,7 @@ def test_impulse_cut_is_inert_while_driving():
 
     Drives from the drop: straight at 3 rad/s on both rigs, and a helhest_v2
     pivot turn whose dragged rear wheel slides under drive torque (a gravity-only
-    cap once clipped it on 998/1000 steps). Checks the engine's own rule.
+    cap would clip it on 998/1000 steps). Checks the engine's own rule.
     """
     from simulator.utils import PhysicsState, WorldConfig
 
@@ -136,8 +136,8 @@ def test_com_transfer_defaults_on_and_is_live():
 def test_step_normal_force_ignores_wheel_spin(engine):
     """A static robot pressed into a 4 cm step: the contact force must not depend
     on wheel spin. Rim points are body-fixed, so only the body velocity
-    compresses the contact; with the spin in v_n the force read 2384 N still,
-    5336 N at +4.5 rad/s and 1482 N at -4.5 rad/s (friction 0 isolates it).
+    compresses the contact; with the spin in v_n the force would read 2384 N
+    still, 5336 N at +4.5 rad/s and 1482 N at -4.5 rad/s (friction 0 isolates it).
     """
     device = "cuda" if engine == "warp" and torch.cuda.is_available() else "cpu"
     dt = 2e-3

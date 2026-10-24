@@ -1,11 +1,11 @@
 """Torch-engine vs. Warp-engine parity, forward and backward.
 
 A dynamic loop in a Warp kernel gets an adjoint built on end-of-loop values:
-the forward still agreed while support gradients went to cosine ~0 at 100 steps
+the forward still agrees while support gradients go to cosine ~0 at 100 steps
 and NaN at 1000. So gradients are checked at full rollout length, both engines
 are cross-checked against finite differences, and the loop construct is banned
 statically. Stiffness takes no gradient in either engine: it is only a simulator
-input now.
+input.
 """
 
 import pytest
@@ -41,11 +41,11 @@ GRAD_RATIO_RANGE_BATCHED = (0.9, 1.1)
 # Same-run floor: torch self-vs-self is bit-identical, warp 7.5e-9 m.
 SAME_RUN_ATOL = 1e-4
 # Support gradient vs central finite differences (eps 5e-4 m, 250 x 1e-3 s),
-# worst cell measured 2026-10-23 (both engines, CPU): flat 0.0063, rough 0.0065.
-# eps was 2e-3 until 32 rim points put neighbours within mm of touching, where a
-# 2 mm step is truncation error (flat 0.024 -> 0.017 -> 0.006 at 2e-3/1e-3/5e-4).
-# Rough fails the detached raise (0.071) and the old touchdown damping (0.33),
-# both measured at eps 2e-3.
+# worst cell (both engines, CPU): flat 0.0063, rough 0.0065. eps is 5e-4 because
+# 32 rim points put neighbours within mm of touching, where a 2 mm step is
+# truncation error (flat 0.024 -> 0.017 -> 0.006 at 2e-3/1e-3/5e-4). Rough fails
+# a detached raise (0.071) and depth-independent touchdown damping (0.33), both
+# measured at eps 2e-3.
 FD_REL_TOL = {"flat": 0.02, "rough": 0.06}
 
 
@@ -147,8 +147,8 @@ def test_forward_pose_matches_torch(n_steps, dt, robot):
 # --- Gradient parity ---
 
 
-# The dynamic-loop adjoint first broke at 100 steps and went NaN at 1000, the
-# training length; both must stay covered.
+# A dynamic-loop adjoint breaks at 100 steps and goes NaN at 1000, the training
+# length; both must stay covered.
 @pytest.mark.parametrize("robot", ROBOTS)
 @pytest.mark.parametrize("dt", DTS)
 @pytest.mark.parametrize("n_steps", [50, 100, 250, 1000])
@@ -300,8 +300,8 @@ def test_initial_pose_override_is_honoured(engine):
 def test_initial_state_gradients_match_torch():
     """Gradients into a seeded initial q / xd / omega must flow in both engines.
 
-    Warp used to return None for them, silently cutting a graph that seeds a
-    segment from a differentiable state. q is compared in the tangent space:
+    Returning None for them would silently cut a graph that seeds a segment
+    from a differentiable state. q is compared in the tangent space:
     torch normalises q, warp's rotation does not, so they differ along q itself.
     """
     n_steps = 250
@@ -341,7 +341,7 @@ def test_rest_start_gradients_match_torch():
     """Seeded at rest at its rest sag, the robot's v_n is exactly 0 on step 0.
     The damping is c * v_n in both engines (c = min(depth lam / n_w,
     share m_eff_n / dt)), so dF/dv_n = -c there and matches a central finite
-    difference; the |v_n| sign(v_n) form gave 0 in torch and -share m_eff_n / dt
+    difference; the |v_n| sign(v_n) form gives 0 in torch and -share m_eff_n / dt
     in warp (init xd gradient x0.45). The wheels spin, so the slip is not 0
     (where torch's |v| and warp's sqrt(|v|^2 + 1e-12) still differ).
     """
@@ -474,10 +474,9 @@ def test_gradient_matches_finite_differences(engine, robot, terrain):
     """Each engine's support gradient must match central finite differences.
 
     Catches both engines agreeing on the same mistake; torch is the parity
-    reference and nothing else checks it. Before the contact force was made
-    continuous at touchdown (Hunt-Crossley damping) the analytic gradient ran
-    5-35 % low (rel errors up to 0.43 here); see FD_REL_TOL for the measured
-    errors since.
+    reference and nothing else checks it. A contact force discontinuous at
+    touchdown makes the analytic gradient run 5-35 % low (rel errors up to 0.43
+    here); see FD_REL_TOL for the measured errors.
     """
     rels = _fd_rel_errors(engine, robot, terrain)
     assert rels, "no cell carried gradient — the test verified nothing"
@@ -505,8 +504,8 @@ def _off_map_rollout(engine):
 
 def test_off_map_rollout_matches_torch_and_stays_bounded():
     """Off the map both engines extend the edge height flat under a vertical
-    normal. The edge cell's tilted normal there pushed sideways forever: a
-    non-conservative force, support gradient 1e28 here before the damping cap."""
+    normal. The edge cell's tilted normal there would push sideways forever: a
+    non-conservative force, support gradient 1e28 here without the damping cap."""
     pos_t, g_t, mc = _off_map_rollout("torch")
     pos_w, g_w, _ = _off_map_rollout("warp")
     off = (pos_t[:, 0] > mc).float().mean().item()
@@ -520,7 +519,7 @@ def test_off_map_rollout_matches_torch_and_stays_bounded():
 @pytest.mark.parametrize("engine", ["torch", "warp"])
 def test_stiffness_takes_no_gradient(engine):
     """Stiffness is the robot's tyre constant: neither engine differentiates it.
-    Torch did, through k and lam, while warp returned None."""
+    Catches torch differentiating it through k and lam."""
     t_horizon = 100 * DT
     support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon)
     k = torch.full_like(support, 2.1e5, requires_grad=True)
@@ -536,7 +535,7 @@ def test_gradients_match_torch_on_a_stiffness_ramp():
     """Only the input stiffness grid takes no gradient: the sampled stiffness
     still varies with contact position, and both engines differentiate that.
 
-    Detaching it in torch gave a relative difference of 6.9e-3 here (CPU; under
+    Detaching it in torch gives a relative difference of 6.9e-3 here (CPU; under
     1e-2 on every ramp tried, hence 1e-3); 2e-6 without.
     """
     t_horizon = 100 * DT_TRAIN
@@ -613,9 +612,9 @@ def _rollout_with_poisoned_cotangent(engine, n_steps=50):
 def test_non_finite_gradients_propagate(engine):
     """Both engines must hand a non-finite gradient back as it is.
 
-    The trainer skips the step on one (utils/trainer.py). Warp used to zero them,
-    so a simulator blow-up on warp trained on as a silent zero gradient,
-    indistinguishable from a converged rollout.
+    The trainer skips the step on one (utils/trainer.py). Zeroing them would let
+    a simulator blow-up train on as a silent zero gradient, indistinguishable
+    from a converged rollout.
     """
     g = _rollout_with_poisoned_cotangent(engine)
     assert not torch.isfinite(g).all(), f"{engine} sanitised a non-finite gradient"

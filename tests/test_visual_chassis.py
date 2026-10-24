@@ -3,15 +3,14 @@
 Nothing in the physics reads the chassis box -- the engine knows the machine as
 three wheel contacts plus mass and inertia -- so a wrong box costs nothing and
 is never caught by a metric. It is still worth being right: every judgement made
-by looking at a SimView scene is made against this outline. Until 2026-09-30 the
-box was 1.00 x 0.60 x 0.30 m centred on base_link, which is the FRONT AXLE, so
-it hung 0.5 m out in front of the front wheels and stopped 0.2 m short of the
-rear one.
+by looking at a SimView scene is made against this outline. A 1.00 x 0.60 x
+0.30 m box centred on base_link, which is the FRONT AXLE, hangs 0.5 m out in
+front of the front wheels and stops 0.2 m short of the rear one.
 
 The envelope asserted here is dataset_tools' viewer's (CHASSIS / CHASSIS_CENTER
 in dataset_tools/viewer/build.py), so the same robot is drawn in both tools.
 It is deliberately NOT the URDF's base_link box (`0.26 0.6 0.18` at
-`-0.047 0 0`, identical in the 2025-09-12 and 2026-09-29 bags): that is the
+`-0.047 0 0`, identical in the v1 and v2 bags): that is the
 frame member alone, without motors, battery or wheel forks.
 """
 
@@ -80,7 +79,7 @@ def test_the_box_sits_within_the_wheels_vertically():
 
 
 def test_the_old_centred_box_would_fail_these():
-    """Guards the regression, not the fix: the previous numbers must not pass."""
+    """Guards the regression, not the fix: a box centred on base_link must not pass."""
     old_front = 0.5
     assert old_front > robot_model_config("helhest").wheel_radii[0].item()
 
