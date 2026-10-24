@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass, replace
+from functools import cached_property
 from typing import Tuple, Union
 
 import torch
@@ -107,13 +108,22 @@ class WorldConfig:
             dim=1,
         )  # (B, 6, H, W)
 
-    @property
+    @cached_property
     def grid_center(self) -> torch.Tensor:
-        """Return the (x, y) grid center from the side and fwd bounds."""
+        """Return the (x, y) grid center from the side and fwd bounds.
+
+        Cached, as the torch engine reads it every step, and built without a host
+        sync whether the bounds are floats or device scalars.
+        """
         center_y = (self.fwd_range[0] + self.fwd_range[1]) / 2.0
         center_x = (self.side_range[0] + self.side_range[1]) / 2.0
-        return torch.tensor(
-            (center_x, center_y), dtype=torch.float32, device=self.z_grid.device
+        return torch.stack(
+            [
+                torch.as_tensor(c, dtype=torch.float32).to(
+                    self.z_grid.device, non_blocking=True
+                )
+                for c in (center_x, center_y)
+            ]
         )
 
 
@@ -438,17 +448,18 @@ def find_init_rob_position(
         x_init: (B, 3)  world position of the body origin
         q_init: (B, 4)  unit quaternion [w, x, y, z]
     """
+    # Host constants go over asynchronously: no host sync in the fit.
+    def to_device(x):
+        return torch.as_tensor(x, dtype=torch.float32).to(device, non_blocking=True)
+
     grid_center = world_config.grid_center.to(device)
-    wheel_centers = torch.as_tensor(
-        robot_model.wheel_centers, device=device, dtype=torch.float32
-    )  # (3, 3)
-    wheel_radii = torch.as_tensor(
-        robot_model.wheel_radii, device=device, dtype=torch.float32
-    )
+    wheel_centers = to_device(robot_model.wheel_centers)  # (3, 3)
+    wheel_radii = to_device(robot_model.wheel_radii)
     R_wheel = wheel_radii.mean()
 
-    q_identity = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(batch_size, 4)
-    q_flip = torch.tensor([0.0, 1.0, 0.0, 0.0], device=device).expand(batch_size, 4)
+    q_identity = to_device([1.0, 0.0, 0.0, 0.0]).expand(batch_size, 4)
+    q_flip = to_device([0.0, 1.0, 0.0, 0.0]).expand(batch_size, 4)
+    z_up = to_device([[0.0, 0.0, 1.0]]).expand(batch_size, 3)
 
     q = q_identity.clone()
     x = torch.zeros(batch_size, 3, device=device)
@@ -476,7 +487,6 @@ def find_init_rob_position(
         n = n / (n.norm(dim=1, keepdim=True) + 1e-6)
 
         # Shortest-arc rotation of the body up-axis onto the plane normal.
-        z_up = torch.tensor([[0.0, 0.0, 1.0]], device=device).expand(batch_size, 3)
         v_cross = torch.linalg.cross(z_up, n, dim=1)
         c = (z_up * n).sum(dim=1, keepdim=True)
         denom = (2 * (1 + c)).clamp_min(1e-6).sqrt()
