@@ -1,6 +1,5 @@
 import math
 from dataclasses import dataclass, replace
-from functools import cached_property
 from typing import Tuple, Union
 
 import torch
@@ -108,19 +107,14 @@ class WorldConfig:
             dim=1,
         )  # (B, 6, H, W)
 
-    @cached_property
-    def grid_center_xy(self) -> tuple:
-        """(x, y) grid center in the bounds' own type: floats for the warp kernels."""
-        return tuple((r[0] + r[1]) / 2.0 for r in (self.side_range, self.fwd_range))
-
-    @cached_property
-    def grid_center(self) -> torch.Tensor:
-        """Return the (x, y) grid center from the side and fwd bounds.
-
-        Cached, as the torch engine reads it every step, and built without a host
-        sync whether the bounds are floats or device scalars.
-        """
-        return torch.stack(
+        # (x, y) grid center from the side and fwd bounds: grid_center_xy in the
+        # bounds' own type (floats for the warp kernels), grid_center a tensor
+        # for the torch engine, which reads it every step; built once, without a
+        # host sync whether the bounds are floats or device scalars.
+        self.grid_center_xy = tuple(
+            (r[0] + r[1]) / 2.0 for r in (self.side_range, self.fwd_range)
+        )
+        self.grid_center = torch.stack(
             [
                 torch.as_tensor(c, dtype=torch.float32).to(
                     self.z_grid.device, non_blocking=True
