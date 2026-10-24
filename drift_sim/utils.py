@@ -3,7 +3,6 @@ from dataclasses import dataclass, replace
 from typing import Tuple, Union
 
 import torch
-from tensordict import TensorClass
 
 from simulator.numerical import interpolate_grid
 from utils.geometry import quat_to_rotmat
@@ -371,7 +370,8 @@ class PhysicsEngineConfig:
 
 
 # --- Physics classes ---
-class PhysicsState(TensorClass):
+@dataclass(eq=False)
+class PhysicsState:
     """Robot state; all vectors in the world frame.
 
     Attributes:
@@ -388,6 +388,11 @@ class PhysicsState(TensorClass):
     omega: torch.Tensor
     wheel_omega: torch.Tensor
 
+    def __post_init__(self):
+        sizes = {t.shape[0] for t in self.__dict__.values()}
+        if len(sizes) != 1:
+            raise ValueError(f"PhysicsState fields disagree on batch size: {sizes}")
+
     @staticmethod
     def dummy(**kwargs) -> "PhysicsState":
         """Create a zero PhysicsState; keyword arguments override fields."""
@@ -403,18 +408,20 @@ class PhysicsState(TensorClass):
         elif batch_size is None:
             batch_size = 0
         base = {
-            # Built on the device: PhysicsState copies a host tensor over blocking.
             "x": torch.zeros(batch_size, 3, device=device),
             "xd": torch.zeros(batch_size, 3, device=device),
             "q": torch.eye(1, 4, device=device).repeat(batch_size, 1),  # identity
             "omega": torch.zeros(batch_size, 3, device=device),
             "wheel_omega": torch.zeros(batch_size, 3, device=device),
-            "batch_size": batch_size,
         }
-        return PhysicsState(**{**base, **kwargs}, device=device)
+        # Overrides are moved here: a host tensor on a device state would
+        # otherwise be copied implicitly (blocking) at its first use.
+        base.update({k: v.to(device) for k, v in kwargs.items()})
+        return PhysicsState(**base)
 
 
-class PhysicsStateDer(TensorClass):
+@dataclass(eq=False)
+class PhysicsStateDer:
     """Time derivative of PhysicsState; world frame.
 
     Attributes:

@@ -55,6 +55,14 @@ def _apply_initial_state_override(state, initial_state, device):
         unused = set(initial_state) - {"x", "q", "xd", "omega"}
         if unused:
             raise ValueError(f"initial_state keys not used by the simulator: {unused}")
+        # A plain dataclass does not check on assignment: a (1, 3) start would
+        # silently broadcast over the whole batch.
+        for k, v in initial_state.items():
+            if v.shape[0] != state.x.shape[0]:
+                raise ValueError(
+                    f"initial_state[{k!r}] has batch {v.shape[0]}, "
+                    f"expected {state.x.shape[0]}"
+                )
         if "x" in initial_state:
             state.x = initial_state["x"].to(device, torch.float32)
         if "q" in initial_state:

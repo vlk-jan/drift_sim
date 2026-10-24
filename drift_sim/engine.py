@@ -415,7 +415,6 @@ class DPhysicsEngine(torch.nn.Module):
         self, state: PhysicsState, dstate: PhysicsStateDer
     ) -> PhysicsState:
         """Integrate state for one timestep."""
-        actual_bs = state.x.shape[0]
 
         # Semi-implicit Euler: positions use the updated velocities.
         next_xd = (state.xd + dstate.xdd * self.config.dt).clamp(-50.0, 50.0)
@@ -431,7 +430,5 @@ class DPhysicsEngine(torch.nn.Module):
             omega=next_omega,
             # Wheel speeds are commanded, not integrated (set by the caller).
             wheel_omega=state.wheel_omega,
-            batch_size=actual_bs,
-            device=state.device,
         )
 
