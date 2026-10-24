@@ -197,10 +197,12 @@ class DPhysicsEngine(torch.nn.Module):
     def _contact_terms(self, state: PhysicsState, world_config: WorldConfig) -> dict:
         """Spring and friction terms of every wheel sample point.
 
-        Returns a dict with the spring force, the friction law ``F_c`` (tanh,
-        uncapped), the impulse limit ``F_lim``, the mask ``capped`` where the cap
-        applies, the applied magnitude ``F_fric``, and the geometry forward needs.
-        Shared by forward and tests/test_engine_invariants.py.
+        Returns a dict with the spring force ``F_springs``, the friction law
+        ``F_c`` (tanh, uncapped, zero where the spring does not push), its impulse
+        limit ``F_lim``, the slip ratio ``slip``, and the geometry the rest of the
+        step reads: ``R``, ``I_world_inv``, ``r_com``, ``r`` (CoM -> point),
+        ``v_tangential``, ``v_rel`` and ``v_dir``. The applied friction magnitude
+        is _friction's. Shared by forward and tests/test_engine_invariants.py.
         """
         R = quat_to_rotmat(state.q)
         R_T = R.transpose(-1, -2)
