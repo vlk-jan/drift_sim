@@ -322,8 +322,9 @@ class PhysicsEngineConfig:
         dt (float): integration time step. Default 2e-3 (500 Hz).
         g (float): gravity. Default 9.81 m/s^2.
         torque_limit (float): clip on the net torque about the CoG. Default 5000 Nm.
-        damping_alpha (float): damping in units of critical damping (1.0 is
-            critical, > 1 overdamped). Default 2.0.
+        damping_alpha (float): contact damping in units of critical heave
+            damping, at the rest sag only: it scales with depth and is capped
+            per point (simulator/engine.py::_calculate_spring_force). Default 2.0.
         ang_damping (float): angular damping coefficient. Default 0.1.
         com_transfer (bool): integrate acceleration onto the body origin rather
             than treating the origin as the CoM. See the field comment below.

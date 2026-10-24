@@ -18,7 +18,7 @@ NUM_WHEEL_POINTS = 32
 # Version of the contact and friction law in both engines. Bump it with any change
 # to how contact forces are computed: run records store it (utils.misc.
 # robot_constants), and checkpoints from another law are refused for scoring.
-CONTACT_LAW = "wheel-deepest-point-v1"
+CONTACT_LAW = "wheel-deepest-point-v2"
 
 # --- Rigid-body model ---
 # COG and wheel triangle are parameters; contact forces do not spin the wheels
@@ -122,6 +122,8 @@ class DPhysicsEngine(torch.nn.Module):
         normals: torch.Tensor,
         stiffness: torch.Tensor,
         in_contact: torch.Tensor,
+        r: torch.Tensor,
+        I_world_inv: torch.Tensor,
     ) -> torch.Tensor:
         """Compute the damped contact spring force on the wheel points.
 
@@ -131,31 +133,59 @@ class DPhysicsEngine(torch.nn.Module):
         point count. Summing a k / n_wheels spring per point instead stiffened the
         wheel with every extra rim point under the sag (at 32 points the
         neighbours sit 6.4 mm up, inside v2's 7.3 mm sag). A point starts
-        touching at zero share, so the force stays continuous. Damping is
-        Hunt-Crossley, proportional to depth: F = depth (k - lam v_n), lam =
-        b k / (m g), b = alpha 2 sqrt(m k). At the rest sag depth m g / k it is b
-        (critical heave damping, as before); at zero depth it is zero, as for a
-        real tyre with no deflection. A depth-independent b v_n made the force
-        jump by b |v_n| / n_wheels at every touchdown, which the analytic
-        gradient cannot see: support gradients came out 5-35 % low and, from a
-        seated start on rough ground, pointed the wrong way (cos -0.28 at 0.25 s).
-        The force is now continuous in the terrain, so `in_contact` only masks.
+        touching at zero share, so the force stays continuous.
+
+        A point pushes relu(depth k / n_wheels - c v_n) along the normal, with
+        Hunt-Crossley damping proportional to depth, c = depth lam / n_wheels,
+        lam = b k / (m g), b = alpha 2 sqrt(m k): uncapped, the robot's total is
+        b, alpha times critical heave damping, at the rest sag depth m g / k
+        only, and zero at zero depth, as for a real tyre with no deflection. A
+        depth-independent b v_n made the force jump by b |v_n| / n_wheels at
+        every touchdown, which the analytic gradient cannot see: support
+        gradients came out 5-35 % low and, from a seated start on rough ground,
+        pointed the wrong way (cos -0.28 at 0.25 s).
+
+        c is capped per point at share m_eff_n / dt, so the damping impulse can
+        at most stop the point's normal velocity through its normal effective
+        mass, 1 / m_eff_n = 1 / m + (r x n) . I^-1 (r x n), in one step; share
+        is the point's depth over the robot's total, as in the friction impulse
+        limit (_friction). Uncapped, c grows with depth while the velocity
+        update is explicit: past ~56 mm / alpha of sinkage (helhest_v2; ~18 mm
+        / alpha on helhest) the step is unstable, and while the forward stays
+        finite under the +-50 clamps the adjoint explodes (gradients 1e13-1e17,
+        NaN; tests/test_contact_damping_regression.py). At alpha 2.0 the cap
+        already binds at rest on helhest and on helhest_v2's front wheels
+        (m_eff_n ~35 kg). Local, no solve, and still zero at zero depth: the
+        force is continuous in the terrain, so `in_contact` only masks.
         """
         k = stiffness.unsqueeze(-1)  # (B, W, 1, 1)
         b = self.config.damping_alpha * 2 * (self._mass * k) ** 0.5
         lam = b * k / (self._mass * self.config.g)
+        n_wheels = self._wheel_radii.shape[0]
 
         xd_points_n = (xd_points * normals).sum(dim=-1, keepdim=True)
 
         # relu makes it unilateral (the ground only pushes).
-        depth = (-dh_points).clamp_min(0)
-        D = depth.amax(dim=2, keepdim=True)  # (B, W, 1, 1)
-        depth = depth * D / depth.sum(dim=2, keepdim=True).clamp_min(1e-12)
-        F_spring_mag = torch.relu(depth * (k - lam * xd_points_n))
+        depth_raw = (-dh_points).clamp_min(0)
+        D = depth_raw.amax(dim=2, keepdim=True)  # (B, W, 1, 1)
+        depth = depth_raw * D / depth_raw.sum(dim=2, keepdim=True).clamp_min(1e-12)
+
+        r_x_n = torch.linalg.cross(r, normals)
+        inv_m_eff_n = 1.0 / self._mass + (
+            r_x_n * torch.einsum("bij,bwpj->bwpi", I_world_inv, r_x_n)
+        ).sum(dim=-1, keepdim=True)
+        m_eff_n = 1.0 / inv_m_eff_n
+        share = depth_raw / depth_raw.sum(dim=(1, 2), keepdim=True).clamp_min(1e-12)
+        damping_unlimited = depth * lam * xd_points_n.abs() / n_wheels
+        damping_limit = share * m_eff_n * xd_points_n.abs() / self.config.dt
+        damping = torch.minimum(damping_unlimited, damping_limit)
+        F_spring_mag = torch.relu(
+            depth * k / n_wheels - damping * torch.sign(xd_points_n)
+        )
 
         F_spring = F_spring_mag * normals
 
-        return F_spring * in_contact / self._wheel_radii.shape[0]
+        return F_spring * in_contact
 
     def _contact_terms(self, state: PhysicsState, world_config: WorldConfig) -> dict:
         """Spring and friction terms of every wheel sample point.
@@ -203,6 +233,11 @@ class DPhysicsEngine(torch.nn.Module):
         # Hard contact gate, shared by the spring force and the impulse limit.
         in_contact = (dh_points < 0).float()  # (B, W, P, 1)
 
+        r_com = R @ self._cog  # body origin -> CoM, world frame (B, 3)
+        com_world = state.x + r_com
+        r = wheel_points - com_world.unsqueeze(1).unsqueeze(1)  # CoM -> contact
+        I_world_inv = R @ self._I_body_inv @ R_T
+
         # (B, W, P, 3)
         # Rim points are body-fixed: only the body velocity compresses the
         # contact; wheel spin is tyre surface speed and enters friction only.
@@ -212,6 +247,8 @@ class DPhysicsEngine(torch.nn.Module):
             normals,
             stif_coeffs,
             in_contact,
+            r,
+            I_world_inv,
         )
 
         # Normal force magnitude.
@@ -243,10 +280,6 @@ class DPhysicsEngine(torch.nn.Module):
             slip / self.config.slip_ref_ratio
         )
 
-        r_com = R @ self._cog  # body origin -> CoM, world frame (B, 3)
-        com_world = state.x + r_com
-        r = wheel_points - com_world.unsqueeze(1).unsqueeze(1)  # CoM -> contact
-        I_world_inv = R @ self._I_body_inv @ R_T
         # 1 / m_eff = 1 / m + (r x t) . I^-1 (r x t): the body's effective mass
         # at the point along the slip.
         u = torch.linalg.cross(r, v_dir)

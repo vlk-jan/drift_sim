@@ -1,9 +1,10 @@
 """Warp port of the spring-contact engine in simulator/engine.py.
 
-Same physics (hard contact gate, Hunt-Crossley spring `relu(depth*(k - lam*vn))`
-with vn the body velocity of the point along the normal), ~10x cheaper per
-rollout. Keep the engines formula-for-formula identical: tests/test_engine_parity.py
-checks forward poses and gradients between them.
+Same physics (hard contact gate, Hunt-Crossley spring `relu(depth*k - c*vn)` with
+the damping c capped per point, vn the body velocity of the point along the
+normal), ~10x cheaper per rollout. Keep the engines formula-for-formula
+identical: tests/test_engine_parity.py checks forward poses and gradients
+between them.
 
 The rollout is one kernel launch per timestep on a wp.Tape, with state in
 step-indexed arrays (`state_x[step]`, ...), and contact points are threads
@@ -159,8 +160,8 @@ def depth_sum_kernel(
     """Pass 1: sum the penetration depth over each robot's sample points, and
     sum and max it per wheel.
 
-    The friction impulse limit shares itself over the contacts by depth, and a
-    wheel's spring acts on its deepest point shared by depth (simulator/
+    The friction and damping impulse limits share over the contacts by depth,
+    and a wheel's spring acts on its deepest point shared by depth (simulator/
     engine.py::_calculate_spring_force), so these need their own launch before
     force accumulation.
     """
@@ -267,7 +268,20 @@ def contact_point(
     depth = -dist * wheel_depth_max[step, b, w] / wp.max(
         wheel_depth_sum[step, b, w], 1.0e-12
     )
-    f_mag = wp.max(depth * (k_s - lam * vn), 0.0) / float(NUM_WHEELS)
+    r = p_world - com_world
+    r_x_n = wp.cross(r, n_surf)
+    inv_m_eff_n = 1.0 / mass + wp.dot(
+        r_x_n, wp.quat_rotate(q, inertia_body_inv * wp.quat_rotate_inv(q, r_x_n))
+    )
+    share = -dist / wp.max(depth_sum[step, b], 1.0e-12)
+    damping_unlimited = depth * lam * wp.abs(vn) / float(NUM_WHEELS)
+    damping_limit = share * wp.abs(vn) / (dt * inv_m_eff_n)
+    damping = wp.min(damping_unlimited, damping_limit)
+    # Oppose vn: subtract positive damping when expanding (vn > 0), add it
+    # when compressing (vn < 0), matching torch.sign in engine.py.
+    if vn < 0.0:
+        damping = -damping
+    f_mag = wp.max(depth * k_s / float(NUM_WHEELS) - damping, 0.0)
     F_spring = n_surf * f_mag
 
     # Friction uses the tangential velocity only (see simulator/engine.py).
@@ -288,7 +302,6 @@ def contact_point(
 
     # Impulse limit: stop the slip in one step through the effective mass,
     # shared by depth (see simulator/engine.py::_friction).
-    r = p_world - com_world
     r_x_t = wp.cross(r, v_dir)
     inv_m_eff = 1.0 / mass + wp.dot(
         r_x_t, wp.quat_rotate(q, inertia_body_inv * wp.quat_rotate_inv(q, r_x_t))
