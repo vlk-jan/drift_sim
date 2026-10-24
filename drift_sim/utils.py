@@ -46,6 +46,9 @@ class WorldConfig:
     k_friction: Union[float, torch.Tensor] = 0.5
 
     def __post_init__(self):
+        # A wrapper's unset bounds (None) take the default, +-max_coord (below).
+        self.side_range = (0.0, 0.0) if self.side_range is None else self.side_range
+        self.fwd_range = (0.0, 0.0) if self.fwd_range is None else self.fwd_range
         self.z_grid = self.z_grid.to(torch.float32)
 
         # max_coord as a 2-vector for grid_sample broadcasting; max_coord_xy keeps
