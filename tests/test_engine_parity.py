@@ -338,11 +338,12 @@ def test_initial_state_gradients_match_torch():
 
 
 def test_rest_start_gradients_match_torch():
-    """Seeded at rest at its rest sag, the robot's v_n is exactly 0 on step 0,
-    where the damping and its adjoint are 0 in both engines (torch: abs'(0) =
-    sign(0) = 0). Warp's abs and min adjoints gave dF/dv_n = -share m_eff_n / dt
-    there: the init xd gradient came out x0.45. The wheels spin, so the slip is
-    not 0 (where torch's |v| and warp's sqrt(|v|^2 + 1e-12) still differ).
+    """Seeded at rest at its rest sag, the robot's v_n is exactly 0 on step 0.
+    The damping is c * v_n in both engines (c = min(depth lam / n_w,
+    share m_eff_n / dt)), so dF/dv_n = -c there and matches a central finite
+    difference; the |v_n| sign(v_n) form gave 0 in torch and -share m_eff_n / dt
+    in warp (init xd gradient x0.45). The wheels spin, so the slip is not 0
+    (where torch's |v| and warp's sqrt(|v|^2 + 1e-12) still differ).
     """
     t_horizon = 5 * DT_TRAIN
     support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon, dt=DT_TRAIN)

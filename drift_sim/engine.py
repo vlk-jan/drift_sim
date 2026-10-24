@@ -184,12 +184,8 @@ class DPhysicsEngine(torch.nn.Module):
         ).sum(dim=-1, keepdim=True)
         m_eff_n = 1.0 / inv_m_eff_n
         share = depth_raw / depth_raw.sum(dim=(1, 2), keepdim=True).clamp_min(1e-12)
-        damping_unlimited = depth * lam * xd_points_n.abs() / n_wheels
-        damping_limit = share * m_eff_n * xd_points_n.abs() / self.config.dt
-        damping = torch.minimum(damping_unlimited, damping_limit)
-        F_spring_mag = torch.relu(
-            depth * k / n_wheels - damping * torch.sign(xd_points_n)
-        )
+        c = torch.minimum(depth * lam / n_wheels, share * m_eff_n / self.config.dt)
+        F_spring_mag = torch.relu(depth * k / n_wheels - c * xd_points_n)
 
         F_spring = F_spring_mag * normals
 
