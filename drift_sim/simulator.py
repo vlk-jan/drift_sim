@@ -207,6 +207,7 @@ class Simulator(torch.nn.Module):
         vel_ts: torch.Tensor,
         initial_state: Optional[dict] = None,
         T_horizon: Optional[float] = None,
+        include_start: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Roll out SE(3) poses for the given wheel velocities.
 
@@ -225,6 +226,10 @@ class Simulator(torch.nn.Module):
             "x"/"q" override the terrain-fitted pose (e.g. a GT segment start).
         T_horizon : float, optional
             Simulation horizon; defaults to self.T_horizon.
+        include_start : bool, optional
+            Also return the start state (raised to clearance) first, stamped
+            vel_ts[b, 0], so a loss can anchor on the state the rollout starts
+            from. Outputs then have SimSteps + 1 entries.
 
         Returns:
         -------
@@ -233,7 +238,7 @@ class Simulator(torch.nn.Module):
         timestamps : torch.Tensor
             float64, (B, SimSteps). Pose i is the post-step state stamped at the
             step's end, so the first stamp is vel_ts[b, 0] + dt (same as the warp
-            wrapper).
+            wrapper) unless include_start.
         xd_out : torch.Tensor
             Linear velocity, (B, SimSteps, 3).
         omega_out : torch.Tensor
@@ -264,6 +269,12 @@ class Simulator(torch.nn.Module):
         timestamps_list = []
 
         ts = vel_ts[:, 0].clone()
+        if include_start:
+            R_list.append(quat_to_rotmat(state.q))
+            t_list.append(state.x)
+            xd_out_list.append(state.xd)
+            omega_out_list.append(state.omega)
+            timestamps_list.append(ts)
 
         for idx in range(num_steps):
             state.wheel_omega = vel_ctrl[:, idx]
@@ -284,7 +295,7 @@ class Simulator(torch.nn.Module):
         top_part = torch.cat(
             [R_all, t_all.unsqueeze(-1)], dim=-1
         )  # (B, SimSteps, 3, 4)
-        bottom = torch.zeros(actual_bs, num_steps, 1, 4, device=self.device)
+        bottom = torch.zeros(actual_bs, R_all.shape[1], 1, 4, device=self.device)
         bottom[:, :, 0, 3] = 1.0
         poses = torch.cat([top_part, bottom], dim=2)  # (B, SimSteps, 4, 4)
 

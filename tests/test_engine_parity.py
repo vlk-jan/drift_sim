@@ -297,6 +297,41 @@ def test_initial_pose_override_is_honoured(engine):
     )
 
 
+@pytest.mark.parametrize("engine", ["torch", "warp"])
+def test_include_start_prepends_the_raised_start(engine):
+    """include_start returns the state the rollout steps from first, at vel_ts[:, 0]:
+    the seed raised to clearance (the segmented loss anchors on it), its seeded
+    velocities; the steps after it are the default call's."""
+    from models.simulator import _build_world_config
+
+    t_horizon = 20 * DT
+    sim = _make_sim(engine, t_horizon)
+    support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon)
+    props = {"support": support.detach() + 0.05, "friction": friction.detach()}
+    init = {
+        "x": torch.tensor([[0.3, -0.2, 0.0]], device=DEVICE),  # wheels below ground
+        "q": torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=DEVICE),
+        "xd": torch.tensor([[0.5, 0.0, 0.0]], device=DEVICE),
+        "omega": torch.tensor([[0.0, 0.0, 0.1]], device=DEVICE),
+    }
+    base = sim.predict_trajectory(props, ctrl, ctrl_ts, initial_state=init)
+    full = sim.predict_trajectory(
+        props, ctrl, ctrl_ts, initial_state=init, include_start=True
+    )
+    for b, f in zip(base, full):
+        assert torch.allclose(f[:, 1:], b, atol=SAME_RUN_ATOL), engine
+
+    pose, ts, xd, omega = (o[:, 0] for o in full)
+    raised = sim.raise_to_clearance(
+        init["x"], init["q"], _build_world_config(sim, props)
+    )
+    assert raised[0, 2] > 0.01, "the seed must start below ground to test the lift"
+    assert torch.allclose(pose[:, :3, 3], raised, atol=1e-6), engine
+    assert torch.allclose(pose[:, :3, :3], torch.eye(3, device=DEVICE)), engine
+    assert torch.equal(ts, ctrl_ts[:, 0].double())
+    assert torch.equal(xd, init["xd"]) and torch.equal(omega, init["omega"])
+
+
 def test_initial_state_gradients_match_torch():
     """Gradients into a seeded initial q / xd / omega must flow in both engines.
 

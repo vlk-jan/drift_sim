@@ -80,6 +80,7 @@ class Simulator(torch.nn.Module):
         vel_ts,
         initial_state: Optional[dict] = None,
         T_horizon: Optional[float] = None,
+        include_start: bool = False,
     ):
         """Roll out a trajectory with the Warp engine: four kernel launches per
         physics step on a wp.Tape, replayed from a captured graph (see
@@ -95,6 +96,8 @@ class Simulator(torch.nn.Module):
             Absolute Unix timestamps, (B, Steps); each element has its own window.
         initial_state : dict, optional
             May contain only "x", "q", "xd", "omega".
+        include_start : bool, optional
+            Also return the start state first; see models/simulator.py.
 
         Returns:
         -------
@@ -102,7 +105,8 @@ class Simulator(torch.nn.Module):
             Robot poses, (B, SimSteps, 4, 4).
         timestamps : torch.Tensor
             float64, (B, SimSteps). Pose i is the post-step state stamped at the
-            step's end, so the first stamp is vel_ts[b, 0] + dt.
+            step's end, so the first stamp is vel_ts[b, 0] + dt unless
+            include_start.
         xd_out : torch.Tensor
             Linear velocity, (B, SimSteps, 3).
         omega_out : torch.Tensor
@@ -161,6 +165,14 @@ class Simulator(torch.nn.Module):
         traj_x, traj_q, traj_xd, traj_omega = self.engine.run_trajectory(
             state, dense_controls, world_config, self.engine_config
         )
+        if include_start:
+            traj_x, traj_q, traj_xd, traj_omega = (
+                torch.cat([s.unsqueeze(0), t])
+                for s, t in zip(
+                    (state.x, state.q, state.xd, state.omega),
+                    (traj_x, traj_q, traj_xd, traj_omega),
+                )
+            )
 
         # engine_wp returns wxyz quaternions.
         R = quat_to_rotmat(traj_q)  # (SimSteps, B, 3, 3)
@@ -169,7 +181,7 @@ class Simulator(torch.nn.Module):
         T = (
             torch.eye(4, device=self.device)
             .view(1, 1, 4, 4)
-            .repeat(num_steps, actual_bs, 1, 1)
+            .repeat(x.shape[0], actual_bs, 1, 1)
         )
         T[:, :, :3, :3] = R
         T[:, :, :3, 3] = x
@@ -181,5 +193,7 @@ class Simulator(torch.nn.Module):
         # Poses are post-step states stamped at the step's end: engine_wp drops the
         # seeded step 0, so pose i is the state after step i+1.
         timestamps = query_times + sim_dt  # (B, SimSteps), float64
+        if include_start:
+            timestamps = torch.cat([vel_ts[:, :1], timestamps], dim=1)
 
         return T, timestamps, xd_out, omega_out
