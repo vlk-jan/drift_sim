@@ -137,8 +137,9 @@ class DPhysicsEngine(torch.nn.Module):
         d_i D / sum d): flat ground gives the whole-robot k (sag m g / k) at any
         point count. Summing a k / n_wheels spring per point instead stiffened the
         wheel with every extra rim point under the sag (at 32 points the
-        neighbours sit 6.4 mm up, inside v2's 7.3 mm sag). A point starts
-        touching at zero share, so the force stays continuous.
+        neighbours sit 6.4 mm up, inside v2's measured 7.3 mm sag; its simulated
+        rest sag, m g / k at k 2.1e5, is 4.95 mm). A point starts touching at
+        zero share, so the force stays continuous.
 
         A point pushes relu(depth k / n_wheels - c v_n) along the normal, with
         Hunt-Crossley damping proportional to depth, c = depth lam / n_wheels,

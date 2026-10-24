@@ -32,8 +32,9 @@ class WorldConfig:
         ``utils/pcd.py::get_height_map``. Harmless while extents are square and
         zero-centred; pinned by ``tests/test_world_config.py``.
     k_stiffness (float or torch.Tensor): contact stiffness in N/m. A rollout takes
-        the robot's ``contact_stiffness`` (models/simulator.py::_build_world_config);
-        the 400_000 default only serves geometry-only uses (seating, plots).
+        the robot's ``contact_stiffness`` unless ``properties["stiffness"]``
+        overrides it (models/simulator.py::_build_world_config); the 400_000
+        default only serves geometry-only uses (seating, plots).
     k_friction (float or torch.Tensor): terrain friction, default 0.5.
     """
 
@@ -48,16 +49,14 @@ class WorldConfig:
     def __post_init__(self):
         self.z_grid = self.z_grid.to(torch.float32)
 
-        # max_coord as a 2-vector for grid_sample broadcasting.
+        # max_coord as a 2-vector for grid_sample broadcasting; max_coord_xy keeps
+        # it as given, the warp kernel arguments (floats: no device read).
+        if isinstance(self.max_coord, (float, int)):
+            self.max_coord = (self.max_coord, self.max_coord)
+        self.max_coord_xy = self.max_coord
         if isinstance(self.max_coord, (list, tuple)):
-            self.max_coord = torch.tensor(
-                self.max_coord, dtype=torch.float32, device=self.z_grid.device
-            )
-        elif isinstance(self.max_coord, (float, int)):
-            self.max_coord = torch.tensor(
-                [self.max_coord, self.max_coord],
-                dtype=torch.float32,
-                device=self.z_grid.device,
+            self.max_coord = torch.tensor(self.max_coord, dtype=torch.float32).to(
+                self.z_grid.device, non_blocking=True
             )
         else:
             self.max_coord = self.max_coord.to(
@@ -110,20 +109,23 @@ class WorldConfig:
         )  # (B, 6, H, W)
 
     @cached_property
+    def grid_center_xy(self) -> tuple:
+        """(x, y) grid center in the bounds' own type: floats for the warp kernels."""
+        return tuple((r[0] + r[1]) / 2.0 for r in (self.side_range, self.fwd_range))
+
+    @cached_property
     def grid_center(self) -> torch.Tensor:
         """Return the (x, y) grid center from the side and fwd bounds.
 
         Cached, as the torch engine reads it every step, and built without a host
         sync whether the bounds are floats or device scalars.
         """
-        center_y = (self.fwd_range[0] + self.fwd_range[1]) / 2.0
-        center_x = (self.side_range[0] + self.side_range[1]) / 2.0
         return torch.stack(
             [
                 torch.as_tensor(c, dtype=torch.float32).to(
                     self.z_grid.device, non_blocking=True
                 )
-                for c in (center_x, center_y)
+                for c in self.grid_center_xy
             ]
         )
 
@@ -265,7 +267,9 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
     v2.5 fidelity windows (rigid 0000/0002-0006, rough 0021-0023/0028-0033,
     held-out 0001; mu <= 1.0) against the 16-point engine at 1.42e5 / 1.0: xy
     ties on rigid and rough, held-out xy -0.2 mm, |z| -1.7 to -2.7 mm, held-out
-    yaw +0.03 deg. The constants were picked on those same windows.
+    yaw +0.03 deg. The constants were picked on those same windows. These
+    figures are from contact law v1, the uncapped damping before the 2026-10-24
+    per-point cap; the fidelity windows are to be re-run under the capped law.
     The same numbers confirm the RADIUS as physical: mean free radius 0.337,
     loaded 0.329, and the rolling radius of a pneumatic tyre r_free - sag/3 =
     0.334 -- so /joint_states is wheel-side, no gear or encoder scale.
@@ -408,12 +412,11 @@ class PhysicsState(TensorClass):
         elif batch_size is None:
             batch_size = 0
         base = {
-            "x": torch.zeros(batch_size, 3),
-            "xd": torch.zeros(batch_size, 3),
-            "q": torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).repeat(
-                batch_size, 1
-            ),
-            "omega": torch.zeros(batch_size, 3),
+            # Built on the device: PhysicsState copies a host tensor over blocking.
+            "x": torch.zeros(batch_size, 3, device=device),
+            "xd": torch.zeros(batch_size, 3, device=device),
+            "q": torch.eye(1, 4, device=device).repeat(batch_size, 1),  # identity
+            "omega": torch.zeros(batch_size, 3, device=device),
             "wheel_omega": torch.zeros(batch_size, 3, device=device),
             "batch_size": batch_size,
         }

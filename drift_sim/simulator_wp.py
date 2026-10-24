@@ -81,8 +81,9 @@ class Simulator(torch.nn.Module):
         initial_state: Optional[dict] = None,
         T_horizon: Optional[float] = None,
     ):
-        """Roll out a trajectory with the Warp engine: one kernel launch per
-        physics step, recorded on a wp.Tape (see simulator/engine_wp.py).
+        """Roll out a trajectory with the Warp engine: four kernel launches per
+        physics step on a wp.Tape, replayed from a captured graph (see
+        simulator/engine_wp.py).
 
         Parameters
         ----------

@@ -840,8 +840,8 @@ class WarpStaticEngine:
             self.wp_inertia_inv,
             self.wp_cog,
             self.mass,
-            world_config.grid_center,
-            world_config.max_coord,
+            world_config.grid_center_xy,  # floats, so no device read
+            world_config.max_coord_xy,
             engine_config.dt,
             num_steps,
             engine_config.g,
