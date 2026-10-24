@@ -237,7 +237,9 @@ class Simulator(torch.nn.Module):
 
         world_config = _build_world_config(self, properties)
         state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
-        state.x, state.q = self.fit_plane_pose(world_config, actual_bs)
+        # Skipped when the caller seeds both x and q (the segmented loss does).
+        if not {"x", "q"} <= set(initial_state or ()):
+            state.x, state.q = self.fit_plane_pose(world_config, actual_bs)
 
         state = _apply_initial_state_override(state, initial_state, self.device)
 

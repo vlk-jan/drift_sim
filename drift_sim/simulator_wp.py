@@ -112,8 +112,10 @@ class Simulator(torch.nn.Module):
         actual_bs = vel_ctrl.shape[0]
         state = PhysicsState.dummy(batch_size=actual_bs, device=self.device)
         # Detached on purpose; see models/simulator.py::Simulator.fit_plane_pose.
-        with torch.no_grad():
-            state.x, state.q = self.fit_plane_pose(world_config, actual_bs)
+        # Skipped when the caller seeds both x and q (the segmented loss does).
+        if not {"x", "q"} <= set(initial_state or ()):
+            with torch.no_grad():
+                state.x, state.q = self.fit_plane_pose(world_config, actual_bs)
 
         # Seeds segmented-loss segments at their GT start pose.
         state = _apply_initial_state_override(state, initial_state, self.device)
