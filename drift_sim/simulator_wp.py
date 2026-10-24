@@ -102,15 +102,15 @@ class Simulator(torch.nn.Module):
         Returns:
         -------
         transformations : torch.Tensor
-            Robot poses, (B, SimSteps, 4, 4).
+            Robot poses, (B, K, 4, 4), K = SimSteps + int(include_start).
         timestamps : torch.Tensor
-            float64, (B, SimSteps). Pose i is the post-step state stamped at the
+            float64, (B, K). Pose i is the post-step state stamped at the
             step's end, so the first stamp is vel_ts[b, 0] + dt unless
             include_start.
         xd_out : torch.Tensor
-            Linear velocity, (B, SimSteps, 3).
+            Linear velocity, (B, K, 3).
         omega_out : torch.Tensor
-            Angular velocity, (B, SimSteps, 3).
+            Angular velocity, (B, K, 3).
         """
         world_config = _build_world_config(self, properties)
 
@@ -191,7 +191,8 @@ class Simulator(torch.nn.Module):
         omega_out = traj_omega.permute(1, 0, 2)  # (B, SimSteps, 3)
 
         # Poses are post-step states stamped at the step's end: engine_wp drops the
-        # seeded step 0, so pose i is the state after step i+1.
+        # seeded step 0, so its pose i is the state after step i+1; include_start
+        # puts the start, stamped vel_ts[:, 0], in front.
         timestamps = query_times + sim_dt  # (B, SimSteps), float64
         if include_start:
             timestamps = torch.cat([vel_ts[:, :1], timestamps], dim=1)

@@ -234,15 +234,15 @@ class Simulator(torch.nn.Module):
         Returns:
         -------
         transformations : torch.Tensor
-            Robot poses, (B, SimSteps, 4, 4).
+            Robot poses, (B, K, 4, 4), K = SimSteps + int(include_start).
         timestamps : torch.Tensor
-            float64, (B, SimSteps). Pose i is the post-step state stamped at the
+            float64, (B, K). Pose i is the post-step state stamped at the
             step's end, so the first stamp is vel_ts[b, 0] + dt (same as the warp
             wrapper) unless include_start.
         xd_out : torch.Tensor
-            Linear velocity, (B, SimSteps, 3).
+            Linear velocity, (B, K, 3).
         omega_out : torch.Tensor
-            Angular velocity, (B, SimSteps, 3).
+            Angular velocity, (B, K, 3).
         """
         actual_bs = vel_ctrl.shape[0]
 
