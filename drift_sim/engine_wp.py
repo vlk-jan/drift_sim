@@ -17,8 +17,6 @@ primal input resident for an exact reverse pass.
 reintroducing such loops.
 """
 
-import warnings
-
 import numpy as np
 import torch
 import warp as wp
@@ -26,10 +24,6 @@ import warp as wp
 from simulator.engine import NUM_WHEEL_POINTS as _NUM_WHEEL_POINTS
 
 wp.init()
-
-# The warp adjoint zeroes non-finite gradients while the torch engine propagates
-# them, so the zeroing is announced once per process rather than done silently.
-_WARNED_NONFINITE_GRAD = False
 
 # Compile-time constants so their loops unroll; don't make these kernel
 # parameters (see module docstring).
@@ -737,45 +731,29 @@ class WarpTrajectoryFunc(torch.autograd.Function):
                 dst.copy_(gr[..., [1, 2, 3, 0]] if quat else gr)  # WXYZ -> XYZW
         _launch(ro.adjoint_graph, ro.device)
 
-        def zero_nonfinite(g, name):
-            global _WARNED_NONFINITE_GRAD
-            nonfinite = int((~torch.isfinite(g)).sum())
-            if nonfinite and not _WARNED_NONFINITE_GRAD:
-                _WARNED_NONFINITE_GRAD = True
-                warnings.warn(
-                    f"warp engine: zeroing {nonfinite} non-finite gradient "
-                    f"entries in '{name}'. The torch engine would propagate "
-                    "them instead (utils/trainer.py zeroes them one level up), "
-                    "so the two engines fail differently. Warned once per "
-                    "process.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-            return torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
-
-        def get_grad(arr, name, needed):
+        # Non-finite gradients propagate as in the torch engine, so the trainer
+        # skips the step (utils/trainer.py) whichever engine blew up.
+        def get_grad(arr, needed):
             if not needed:
                 return None
-            return zero_nonfinite(wp.to_torch(arr.grad).clone().detach(), name)
+            return wp.to_torch(arr.grad).clone().detach()
 
         need = ctx.needs_input_grad
         # The initial state's adjoint is what the tape left in state_*.grad[0]
         # (x0 takes one through the clearance raise, simulator/utils.py::
         # raise_to_clearance; the rest when a caller seeds them with grad).
         init = [
-            zero_nonfinite(wp.to_torch(s.grad)[0].clone(), name) if need[i] else None
-            for i, (s, name) in enumerate(
-                zip(ro.state, ("init_x", "init_q", "init_xd", "init_omega"))
-            )
+            wp.to_torch(s.grad)[0].clone() if need[i] else None
+            for i, s in enumerate(ro.state)
         ]
         if init[1] is not None:
             init[1] = init[1][..., [3, 0, 1, 2]]  # XYZW -> WXYZ
         return (
             *init,
-            get_grad(ro.ctrl, "ctrl", need[4]),
-            get_grad(ro.z, "z", need[5]),
-            get_grad(ro.n, "n", need[6]),
-            get_grad(ro.kf, "kf", need[7]),
+            get_grad(ro.ctrl, need[4]),
+            get_grad(ro.z, need[5]),
+            get_grad(ro.n, need[6]),
+            get_grad(ro.kf, need[7]),
             None,  # stiffness: constant, not a gradient path
             None,  # wheel_centers_wp
             None,  # wheel_radii_wp

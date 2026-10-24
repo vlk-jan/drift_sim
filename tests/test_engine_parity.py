@@ -7,8 +7,6 @@ are cross-checked against finite differences, and the loop construct is banned
 statically. Stiffness is not covered: it is only a simulator input now.
 """
 
-import warnings
-
 import pytest
 import torch
 from _helpers import make_sim as _make_sim_factory
@@ -488,7 +486,7 @@ def test_wheel_geometry_has_one_source():
         assert torch.equal(sim.robot_model.cog, ref.cog)
 
 
-# --- Non-finite gradients: the two engines fail differently ---
+# --- Non-finite gradients: both engines propagate them ---
 
 
 def _rollout_with_poisoned_cotangent(engine, n_steps=50):
@@ -506,33 +504,16 @@ def _rollout_with_poisoned_cotangent(engine, n_steps=50):
     return support.grad
 
 
-def test_warp_zeroes_non_finite_gradients_but_says_so():
-    """The warp adjoint must zero non-finite gradients and warn once.
+@pytest.mark.parametrize("engine", ["torch", "warp"])
+def test_non_finite_gradients_propagate(engine):
+    """Both engines must hand a non-finite gradient back as it is.
 
-    Torch propagates them and the trainer's `isfinite` check zeroes them; a silent
-    zero is indistinguishable from a converged rollout.
+    The trainer skips the step on one (utils/trainer.py). Warp used to zero them,
+    so a simulator blow-up on warp trained on as a silent zero gradient,
+    indistinguishable from a converged rollout.
     """
-    import simulator.engine_wp as ewp
-
-    ewp._WARNED_NONFINITE_GRAD = False
-    with pytest.warns(RuntimeWarning, match="non-finite gradient"):
-        g_warp = _rollout_with_poisoned_cotangent("warp")
-    assert torch.isfinite(g_warp).all(), "warp still returned a non-finite gradient"
-
-    # The warning fires only once per process, so training logs are not flooded.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _rollout_with_poisoned_cotangent("warp")
-    assert not [w for w in caught if "non-finite gradient" in str(w.message)]
-
-
-def test_torch_propagates_non_finite_gradients():
-    """The torch engine must propagate non-finite gradients (deliberate asymmetry)."""
-    g_torch = _rollout_with_poisoned_cotangent("torch")
-    assert not torch.isfinite(g_torch).all(), (
-        "the torch engine now sanitises its gradients too -- update the "
-        "asymmetry documented in simulator/engine_wp.py and utils/trainer.py"
-    )
+    g = _rollout_with_poisoned_cotangent(engine)
+    assert not torch.isfinite(g).all(), f"{engine} sanitised a non-finite gradient"
 
 
 # --- Compiler-level guard ---
