@@ -9,11 +9,10 @@ RES = 0.1
 MAX_COORD = GRID_N * RES / 2  # +-3.2 m
 
 
-def _flat_props(mu, k=4e5):
+def _flat_props(mu):
     return {
         "support": torch.zeros(1, GRID_N, GRID_N),
         "friction": torch.full((1, GRID_N, GRID_N), mu),
-        "stiffness": torch.full((1, GRID_N, GRID_N), k),
     }
 
 
@@ -81,7 +80,6 @@ def test_impulse_cut_is_inert_while_driving():
             side_range=(-MAX_COORD, MAX_COORD),
             fwd_range=(-MAX_COORD, MAX_COORD),
             k_friction=props["friction"],
-            k_stiffness=props["stiffness"],
         )
         state = PhysicsState.dummy(batch_size=1, device="cpu")
         state.x, state.q = sim.fit_plane_pose(world, 1)

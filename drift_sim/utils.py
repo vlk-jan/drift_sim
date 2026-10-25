@@ -29,11 +29,10 @@ class WorldConfig:
         ``fwd_range`` the second (y / lateral), consistently with
         ``utils/pcd.py::get_height_map``. Harmless while extents are square and
         zero-centred; pinned by ``tests/test_world_config.py``.
-    k_stiffness (float or torch.Tensor): contact stiffness in N/m. A rollout takes
-        the robot's ``contact_stiffness`` unless ``properties["stiffness"]``
-        overrides it (models/simulator.py::_build_world_config); the 400_000
-        default only serves geometry-only uses (seating, plots).
     k_friction (float or torch.Tensor): terrain friction, default 0.5.
+
+    Contact stiffness is not a terrain property: both engines read the robot's
+    ``contact_stiffness`` (contact_spring_constants).
     """
 
     z_grid: torch.Tensor
@@ -41,7 +40,6 @@ class WorldConfig:
     max_coord: Union[float, Tuple[float, float]]
     side_range: Tuple[float, float] = (0.0, 0.0)
     fwd_range: Tuple[float, float] = (0.0, 0.0)
-    k_stiffness: Union[float, torch.Tensor] = 400_000.0
     k_friction: Union[float, torch.Tensor] = 0.5
 
     def __post_init__(self):
@@ -89,25 +87,16 @@ class WorldConfig:
         else:
             self.k_friction = self.k_friction.to(torch.float32)
 
-        if not isinstance(self.k_stiffness, torch.Tensor):
-            self.k_stiffness = torch.full_like(
-                self.z_grid, self.k_stiffness, dtype=torch.float32
-            )
-        else:
-            # The robot's tyre constant: no gradient into the grid (both engines).
-            self.k_stiffness = self.k_stiffness.to(torch.float32).detach()
-
-        # One 6-channel grid [z, nx, ny, nz, friction, stiffness] for a single
-        # grid_sample per step.
+        # One 5-channel grid [z, nx, ny, nz, friction] for a single grid_sample
+        # per step.
         self._sample_grid = torch.cat(
             [
                 self.z_grid.unsqueeze(1),  # (B, 1, H, W)
                 self.normals,  # (B, 3, H, W)
                 self.k_friction.unsqueeze(1),  # (B, 1, H, W)
-                self.k_stiffness.unsqueeze(1),  # (B, 1, H, W)
             ],
             dim=1,
-        )  # (B, 6, H, W)
+        )  # (B, 5, H, W)
 
         # (x, y) grid center from the side and fwd bounds: grid_center_xy in the
         # bounds' own type (floats for the warp kernels), grid_center a tensor
@@ -337,6 +326,18 @@ class PhysicsEngineConfig:
     com_transfer: bool = True
 
 
+def contact_spring_constants(robot_model, config):
+    """(k, lam): the contact law's spring and damping constants, as floats.
+
+    k is the robot's whole-robot tyre stiffness; lam = b k / (m g) with
+    b = damping_alpha 2 sqrt(m k) (simulator/engine.py::_calculate_spring_force).
+    Both engines take them from here, so they run on the same numbers.
+    """
+    m, k = float(robot_model.mass), float(robot_model.contact_stiffness)
+    b = config.damping_alpha * 2.0 * math.sqrt(m * k)
+    return k, b * k / (m * config.g)
+
+
 # --- Physics classes ---
 @dataclass(eq=False)
 class PhysicsState:
@@ -502,7 +503,7 @@ def raise_to_clearance(engine, x, q, world_config):
     R_body = quat_to_rotmat(q.detach())  # (B, 3, 3)
     wp_rel = torch.einsum("bij,wpj->bwpi", R_body, engine._wheel_pos_rel)  # (B,W,P,3)
     wc_world = (R_body @ engine._wheel_centers.T).transpose(-1, -2) + x.unsqueeze(1)
-    dh, normals, _, _ = engine._sample_terrain(wp_rel + wc_world.unsqueeze(2), world_config)
+    dh, normals, _ = engine._sample_terrain(wp_rel + wc_world.unsqueeze(2), world_config)
     gap = -dh / normals[..., 2:3].clamp_min(1e-3)  # vertical gap, (B, W, P, 1)
     lift = gap.flatten(1).max(dim=1).values.clamp_min(0)  # (B,)
     return x + torch.stack([torch.zeros_like(lift), torch.zeros_like(lift), lift], -1)
@@ -536,9 +537,8 @@ def compute_wheel_contacts(engine, traj_se3, world_config, chunk_size=64):
             side_range=world_config.side_range,
             fwd_range=world_config.fwd_range,
             k_friction=world_config.k_friction.expand(n, -1, -1),
-            k_stiffness=world_config.k_stiffness.expand(n, -1, -1),
         )
-        dh, _, _, _ = engine._sample_terrain(wp_world, wc)  # (n, W, P, 1)
+        dh, _, _ = engine._sample_terrain(wp_world, wc)  # (n, W, P, 1)
         out.append((dh.squeeze(-1) < 0).reshape(n, -1))
     return torch.cat(out, dim=0)  # (T, W*P) bool
 

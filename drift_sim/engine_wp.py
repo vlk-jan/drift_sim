@@ -24,6 +24,7 @@ import warp as wp
 
 from simulator.engine import NUM_WHEEL_POINTS as _NUM_WHEEL_POINTS
 from simulator.engine import SLIP_DIR_GRAD_EPS as _SLIP_DIR_GRAD_EPS
+from simulator.utils import contact_spring_constants
 
 wp.init()
 
@@ -228,11 +229,11 @@ def contact_point(
     z_grid: wp.array3d(dtype=float),
     normals_grid: wp.array3d(dtype=wp.vec3),
     friction_grid: wp.array3d(dtype=float),
-    stiffness_grid: wp.array3d(dtype=float),
+    stiffness: float,
     grid_center: wp.vec2,
     max_coord: wp.vec2,
     dt: float,
-    damping_alpha: float,
+    damping_lam: float,
     slip_ref_ratio: float,
     slip_floor_velocity: float,
     depth_sum: wp.array2d(dtype=float),
@@ -268,7 +269,6 @@ def contact_point(
         return False, zero, 0.0, zero, 0.0, zero, zero, zero
 
     f_val = sample_grid_bilinear(friction_grid, b, u, v, grid_w, grid_h)
-    k_s = sample_grid_bilinear(stiffness_grid, b, u, v, grid_w, grid_h)
 
     com_world = x + wp.quat_rotate(q, cog)
 
@@ -280,9 +280,8 @@ def contact_point(
     # wheel spin is tyre surface speed and enters friction only.
     vn = wp.dot(v_body, n_surf)
 
-    b_damp = damping_alpha * 2.0 * wp.sqrt(mass) * wp.sqrt(k_s)
-    # Hunt-Crossley damping, zero at zero depth (see simulator/engine.py).
-    lam = b_damp * k_s / (mass * gravity)
+    # Hunt-Crossley damping, zero at zero depth: depth * damping_lam / n_wheels
+    # (see simulator/engine.py; constants from contact_spring_constants).
     # Wheel spring k / n_wheels on its deepest point, shared by depth (see
     # simulator/engine.py).
     depth = -dist * wheel_depth_max[step, b, w] / wp.max(
@@ -294,8 +293,8 @@ def contact_point(
         r_x_n, wp.quat_rotate(q, inertia_body_inv * wp.quat_rotate_inv(q, r_x_n))
     )
     share = -dist / wp.max(depth_sum[step, b], 1.0e-12)
-    c = wp.min(depth * lam / float(NUM_WHEELS), share / (dt * inv_m_eff_n))
-    f_mag = wp.max(depth * k_s / float(NUM_WHEELS) - c * vn, 0.0)
+    c = wp.min(depth * damping_lam / float(NUM_WHEELS), share / (dt * inv_m_eff_n))
+    f_mag = wp.max(depth * stiffness / float(NUM_WHEELS) - c * vn, 0.0)
     F_spring = n_surf * f_mag
 
     # Friction uses the tangential velocity only (see simulator/engine.py).
@@ -375,11 +374,11 @@ def accumulate_forces_kernel(
     z_grid: wp.array3d(dtype=float),
     normals_grid: wp.array3d(dtype=wp.vec3),
     friction_grid: wp.array3d(dtype=float),
-    stiffness_grid: wp.array3d(dtype=float),
+    stiffness: float,
     grid_center: wp.vec2,
     max_coord: wp.vec2,
     dt: float,
-    damping_alpha: float,
+    damping_lam: float,
     slip_ref_ratio: float,
     slip_floor_velocity: float,
     depth_sum: wp.array2d(dtype=float),
@@ -393,8 +392,8 @@ def accumulate_forces_kernel(
     hit, F_spring, f_c_mag, v_dir, f_lim, r, v_t, v_rel = contact_point(
         step, b, w, i, state_x, state_q, state_xd, state_omega, controls,
         wheel_centers, wheel_radii, cog, mass, inertia_body_inv, gravity, z_grid,
-        normals_grid, friction_grid, stiffness_grid, grid_center, max_coord, dt,
-        damping_alpha, slip_ref_ratio, slip_floor_velocity, depth_sum,
+        normals_grid, friction_grid, stiffness, grid_center, max_coord, dt,
+        damping_lam, slip_ref_ratio, slip_floor_velocity, depth_sum,
         wheel_depth_sum, wheel_depth_max,
     )  # fmt: skip
     if not hit:
@@ -422,11 +421,11 @@ def friction_cut_kernel(
     z_grid: wp.array3d(dtype=float),
     normals_grid: wp.array3d(dtype=wp.vec3),
     friction_grid: wp.array3d(dtype=float),
-    stiffness_grid: wp.array3d(dtype=float),
+    stiffness: float,
     grid_center: wp.vec2,
     max_coord: wp.vec2,
     dt: float,
-    damping_alpha: float,
+    damping_lam: float,
     slip_ref_ratio: float,
     slip_floor_velocity: float,
     ang_damping: float,
@@ -446,8 +445,8 @@ def friction_cut_kernel(
     hit, F_spring, f_c_mag, v_dir, f_lim, r, v_t, v_rel = contact_point(
         step, b, w, i, state_x, state_q, state_xd, state_omega, controls,
         wheel_centers, wheel_radii, cog, mass, inertia_body_inv, gravity, z_grid,
-        normals_grid, friction_grid, stiffness_grid, grid_center, max_coord, dt,
-        damping_alpha, slip_ref_ratio, slip_floor_velocity, depth_sum,
+        normals_grid, friction_grid, stiffness, grid_center, max_coord, dt,
+        damping_lam, slip_ref_ratio, slip_floor_velocity, depth_sum,
         wheel_depth_sum, wheel_depth_max,
     )  # fmt: skip
     if not hit:
@@ -545,15 +544,15 @@ class _Rollout:
 
     def __init__(self, B, num_steps, H, W, device, consts):
         (wheel_centers_wp, wheel_radii_wp, inertia_wp, inertia_inv_wp, cog_wp, mass,
-         gc, mc, dt, g, damping_alpha, slip_ref_ratio, slip_floor_velocity,
+         gc, mc, dt, g, stiffness, damping_lam, slip_ref_ratio, slip_floor_velocity,
          ang_damping, torque_limit, com_transfer) = consts  # fmt: skip
         z = lambda shape, dtype, grad=True: wp.zeros(  # noqa: E731
             shape, dtype=dtype, device=device, requires_grad=grad
         )
-        # Inputs, copied in per call; stiffness takes no gradient.
+        # Inputs, copied in per call.
         self.ctrl = z((num_steps, B), wp.vec3)
         self.z, self.n = z((B, H, W), wp.float32), z((B, H, W), wp.vec3)
-        self.kf, self.ks = z((B, H, W), wp.float32), z((B, H, W), wp.float32, False)
+        self.kf = z((B, H, W), wp.float32)
         self.init = [z(B, t, False) for t in (wp.vec3, wp.quat, wp.vec3, wp.vec3)]
         # One slot per step keeps every launch's primal inputs intact for the tape;
         # per-step accumulators too (a reused buffer needs an undifferentiable zeroing).
@@ -571,7 +570,7 @@ class _Rollout:
         self.generation = 0
         self.device = device
 
-        ctrl, wz, wn, kf, ks = self.ctrl, self.z, self.n, self.kf, self.ks
+        ctrl, wz, wn, kf = self.ctrl, self.z, self.n, self.kf
         point_dim = (B, int(NUM_WHEELS), int(NUM_WHEEL_POINTS))
         self.tape = wp.Tape()
         with wp.ScopedCapture(device) as cap:
@@ -588,14 +587,14 @@ class _Rollout:
                     wp.launch(accumulate_forces_kernel, dim=point_dim, inputs=[
                         step, state_x, state_q, state_xd, state_omega, ctrl,
                         wheel_centers_wp, wheel_radii_wp, cog_wp, mass, inertia_inv_wp, g,
-                        wz, wn, kf, ks, gc, mc, dt, damping_alpha, slip_ref_ratio,
+                        wz, wn, kf, stiffness, gc, mc, dt, damping_lam, slip_ref_ratio,
                         slip_floor_velocity, depth_sum, wheel_depth_sum, wheel_depth_max],
                         outputs=[force_acc, torque_acc],
                         device=device)  # fmt: skip
                     wp.launch(friction_cut_kernel, dim=point_dim, inputs=[
                         step, state_x, state_q, state_xd, state_omega, ctrl,
                         wheel_centers_wp, wheel_radii_wp, cog_wp, mass, inertia_wp,
-                        inertia_inv_wp, g, wz, wn, kf, ks, gc, mc, dt, damping_alpha,
+                        inertia_inv_wp, g, wz, wn, kf, stiffness, gc, mc, dt, damping_lam,
                         slip_ref_ratio, slip_floor_velocity, ang_damping, torque_limit,
                         depth_sum, wheel_depth_sum, wheel_depth_max, force_acc, torque_acc],
                         outputs=[force_cut, torque_cut],
@@ -661,8 +660,8 @@ def _get_rollout(B, num_steps, H, W, device, consts, with_grad):
 class WarpTrajectoryFunc(torch.autograd.Function):
     """Roll the trajectory on a captured wp.Tape and hand the adjoint back to torch.
 
-    Stiffness gets no gradient: it is neither predicted nor adapted. The buffers
-    are shared per shape (_Rollout), so a second rollout of the same shape before
+    The contact constants are the robot's scalars (contact_spring_constants), not
+    inputs: nothing differentiates them. The buffers are shared per shape (_Rollout), so a second rollout of the same shape before
     the first one's backward invalidates the first; its backward then raises.
     """
 
@@ -677,7 +676,6 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         z_grid_t,  # (B, H, W)
         normals_grid_t,  # (B, H, W, 3)
         friction_grid_t,  # (B, H, W)
-        stiffness_grid_t,  # (B, H, W), no gradient
         wheel_centers_wp,
         wheel_radii_wp,
         inertia_wp,
@@ -689,7 +687,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         dt,
         num_steps,
         g,
-        damping_alpha,
+        stiffness,
+        damping_lam,
         slip_ref_ratio,
         slip_floor_velocity,
         ang_damping,
@@ -705,7 +704,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             wheel_centers_wp, wheel_radii_wp, inertia_wp, inertia_inv_wp, cog_wp, mass,
             wp.vec2(float(grid_center_t[0]), float(grid_center_t[1])),
             wp.vec2(float(max_coord_t[0]), float(max_coord_t[1])),
-            dt, g, damping_alpha, slip_ref_ratio, slip_floor_velocity, ang_damping,
+            dt, g, stiffness, damping_lam, slip_ref_ratio, slip_floor_velocity, ang_damping,
             torque_limit, com_transfer,
         )  # fmt: skip
         ro = _get_rollout(B, num_steps, H, W, device, consts, with_grad)
@@ -717,7 +716,6 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         put(ro.z, z_grid_t)
         put(ro.n, normals_grid_t)
         put(ro.kf, friction_grid_t)
-        put(ro.ks, stiffness_grid_t)
         for arr, t in zip(ro.init, (init_x, init_q[:, [1, 2, 3, 0]], init_xd, init_omega)):
             put(arr, t)
         _launch(ro.forward_graph, device)
@@ -777,9 +775,6 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             get_grad(ro.z, need[5]),
             get_grad(ro.n, need[6]),
             get_grad(ro.kf, need[7]),
-            # The input stiffness grid takes no gradient; the sampled stiffness
-            # still varies with contact position.
-            None,  # stiffness
             None,  # wheel_centers_wp
             None,  # wheel_radii_wp
             None,  # inertia_wp
@@ -791,7 +786,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             None,  # dt
             None,  # num_steps
             None,  # g
-            None,  # damping_alpha
+            None,  # stiffness
+            None,  # damping_lam
             None,  # slip_ref_ratio
             None,  # slip_floor_velocity
             None,  # ang_damping
@@ -814,6 +810,7 @@ class WarpStaticEngine:
         self.device = wp.get_device(device)
 
         r = robot_model_config
+        self.robot_model = r
         self.mass = float(r.mass)
         self.wp_wheel_radii = wp.from_torch(
             r.wheel_radii.to(device).float().contiguous(), dtype=wp.float32
@@ -832,8 +829,7 @@ class WarpStaticEngine:
     ):
         """Roll out (num_steps, B, 3) wheel speeds; outputs are (num_steps, B, ...)."""
         num_steps = control_velocities.shape[0]
-        B = control_velocities.shape[1]
-        stiffness = world_config.k_stiffness
+        k, lam = contact_spring_constants(self.robot_model, engine_config)
 
         return WarpTrajectoryFunc.apply(
             init_state.x,
@@ -844,7 +840,6 @@ class WarpStaticEngine:
             world_config.z_grid,
             world_config.normals.permute(0, 2, 3, 1),  # (B,3,H,W) -> (B,H,W,3)
             world_config.k_friction,
-            stiffness.expand(B, -1, -1) if stiffness.shape[0] == 1 else stiffness,
             self.wp_wheel_centers,
             self.wp_wheel_radii,
             self.wp_inertia,
@@ -856,7 +851,8 @@ class WarpStaticEngine:
             engine_config.dt,
             num_steps,
             engine_config.g,
-            engine_config.damping_alpha,
+            k,
+            lam,
             float(engine_config.slip_ref_ratio),
             float(engine_config.slip_floor_velocity),
             engine_config.ang_damping,

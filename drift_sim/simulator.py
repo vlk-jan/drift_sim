@@ -31,6 +31,12 @@ def _update_world_config(
 
 def _build_world_config(sim, properties: dict) -> WorldConfig:
     """Build a WorldConfig from the sim's grid geometry and predicted properties."""
+    if "stiffness" in properties:
+        # Silently ignoring it would hide a sweep that changed nothing.
+        raise ValueError(
+            "stiffness is the robot's contact_stiffness, not a terrain property: "
+            "override the robot model instead"
+        )
     return WorldConfig(
         z_grid=properties["support"],
         grid_res=sim.res,
@@ -38,8 +44,6 @@ def _build_world_config(sim, properties: dict) -> WorldConfig:
         side_range=sim.side_range,
         fwd_range=sim.fwd_range,
         k_friction=properties["friction"],
-        # Stiffness is not predicted: it is the robot's tyre constant.
-        k_stiffness=properties.get("stiffness", sim.robot_model.contact_stiffness),
     )
 
 
@@ -224,7 +228,8 @@ class Simulator(torch.nn.Module):
         properties : dict
             - "support": (B, H, W) support surface (height_map - height_residual).
             - "friction": (B, H, W) or scalar.
-            - "stiffness": optional; defaults to the fixed WorldConfig constant.
+            Stiffness is the robot's ``contact_stiffness``; a "stiffness" key
+            raises.
         vel_ctrl : torch.Tensor
             Wheel velocity controls, (B, Steps, 3).
         vel_ts : torch.Tensor

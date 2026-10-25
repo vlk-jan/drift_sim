@@ -116,7 +116,6 @@ def test_contact_force_is_continuous_when_a_point_touches():
         z_grid=torch.zeros(1, 64, 64),
         grid_res=0.1,
         max_coord=3.15,
-        k_stiffness=rm.contact_stiffness,
         k_friction=0.0,
     )
     pitch = math.radians(10.75)  # two ring points of each front wheel nearly level

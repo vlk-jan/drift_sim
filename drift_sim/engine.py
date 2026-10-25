@@ -8,6 +8,7 @@ from simulator.utils import (
     PhysicsStateDer,
     RobotModelConfig,
     WorldConfig,
+    contact_spring_constants,
 )
 from utils.geometry import quat_to_rotmat
 
@@ -95,22 +96,21 @@ class DPhysicsEngine(torch.nn.Module):
         self,
         wheel_points: torch.Tensor,
         world_config: WorldConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sample all terrain properties at the wheel points in one grid_sample.
 
-        Uses the precomputed 6-channel ``world_config._sample_grid``
-        (z, nx, ny, nz, friction, stiffness). Points off the map read the border
+        Uses the precomputed 5-channel ``world_config._sample_grid``
+        (z, nx, ny, nz, friction). Points off the map read the border
         cell under a vertical normal, so a rollout leaving the grid continues on
         the edge height silently.
 
         Args:
             wheel_points:  (B, W, P, 3) world-frame positions of wheel sample points
-            world_config:  WorldConfig with ``_sample_grid`` of shape (B, 6, H, W)
+            world_config:  WorldConfig with ``_sample_grid`` of shape (B, 5, H, W)
 
         Returns:
             dh:           (B, W, P, 1) penetration depth (negative = in contact)
             normals:      (B, W, P, 3) unit surface normals
-            stif_coeffs:  (B, W, P)   stiffness values per sample point
             fric_coeffs:  (B, W, P)   friction values per sample point
         """
         B, W, P, _ = wheel_points.shape
@@ -125,14 +125,13 @@ class DPhysicsEngine(torch.nn.Module):
             mode="bilinear",
             align_corners=True,
             padding_mode="border",
-        )  # (B, 6, 1, W*P)
+        )  # (B, 5, 1, W*P)
 
-        sampled = sampled.squeeze(2).permute(0, 2, 1).reshape(B, W, P, 6)
+        sampled = sampled.squeeze(2).permute(0, 2, 1).reshape(B, W, P, 5)
 
         z_terrain = sampled[..., :1]  # (B, W, P, 1)
         normals = sampled[..., 1:4]  # (B, W, P, 3)
         fric_coeffs = sampled[..., 4]  # (B, W, P)
-        stif_coeffs = sampled[..., 5]  # (B, W, P)
 
         # Bilinear interpolation denormalizes the normals.
         normals = F.normalize(normals, dim=-1, eps=1e-6)
@@ -144,14 +143,13 @@ class DPhysicsEngine(torch.nn.Module):
         # Penetration depth: vertical gap scaled by the normal's z component.
         dh = (wheel_points[..., 2:3] - z_terrain) * normals[..., 2:3]  # (B, W, P, 1)
 
-        return dh, normals, stif_coeffs, fric_coeffs
+        return dh, normals, fric_coeffs
 
     def _calculate_spring_force(
         self,
         dh_points: torch.Tensor,
         xd_points: torch.Tensor,
         normals: torch.Tensor,
-        stiffness: torch.Tensor,
         in_contact: torch.Tensor,
         r: torch.Tensor,
         I_world_inv: torch.Tensor,
@@ -190,11 +188,8 @@ class DPhysicsEngine(torch.nn.Module):
         (m_eff_n ~35 kg). Local, no solve, and still zero at zero depth: the
         force is continuous in the terrain, so `in_contact` only masks.
         """
-        # The input stiffness grid takes no gradient (WorldConfig detaches it); the
-        # sampled stiffness still varies with contact position, as in warp.
-        k = stiffness.unsqueeze(-1)  # (B, W, P, 1)
-        b = self.config.damping_alpha * 2 * (self._mass * k) ** 0.5
-        lam = b * k / (self._mass * self.config.g)
+        # The robot's constants, the same floats the warp engine gets.
+        k, lam = contact_spring_constants(self.robot_model, self.config)
         n_wheels = self._wheel_radii.shape[0]
 
         xd_points_n = (xd_points * normals).sum(dim=-1, keepdim=True)
@@ -239,7 +234,7 @@ class DPhysicsEngine(torch.nn.Module):
         rotated_wheel_pos_rel = torch.einsum("bij,wpj->bwpi", R, self._wheel_pos_rel)
         wheel_points = rotated_wheel_pos_rel + wheel_centers_world.unsqueeze(2)
 
-        dh_points, normals, stif_coeffs, fric_coeffs = self._sample_terrain(
+        dh_points, normals, fric_coeffs = self._sample_terrain(
             wheel_points, world_config
         )
 
@@ -277,7 +272,6 @@ class DPhysicsEngine(torch.nn.Module):
             dh_points,
             v_rigid,
             normals,
-            stif_coeffs,
             in_contact,
             r,
             I_world_inv,

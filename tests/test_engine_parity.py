@@ -4,8 +4,7 @@ A dynamic loop in a Warp kernel gets an adjoint built on end-of-loop values:
 the forward still agrees while support gradients go to cosine ~0 at 100 steps
 and NaN at 1000. So gradients are checked at full rollout length, both engines
 are cross-checked against finite differences, and the loop construct is banned
-statically. Stiffness takes no gradient in either engine: it is only a simulator
-input.
+statically. Stiffness is the robot's constant in both engines, not an input.
 """
 
 import pytest
@@ -552,36 +551,29 @@ def test_off_map_rollout_matches_torch_and_stays_bounded():
 
 
 @pytest.mark.parametrize("engine", ["torch", "warp"])
-def test_stiffness_takes_no_gradient(engine):
-    """Stiffness is the robot's tyre constant: neither engine differentiates it.
-    Catches torch differentiating it through k and lam."""
-    t_horizon = 100 * DT
+def test_a_stiffness_property_is_refused(engine):
+    """Stiffness is the robot's contact_stiffness in both engines; a per-call
+    "stiffness" would be ignored, so it raises."""
+    t_horizon = 10 * DT
     support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon)
-    k = torch.full_like(support, 2.1e5, requires_grad=True)
-    traj, _, _, _ = _make_sim(engine, t_horizon).predict_trajectory(
-        {"support": support, "friction": friction, "stiffness": k}, ctrl, ctrl_ts
-    )
-    traj[:, :, :3, 3].pow(2).sum().backward()
-    assert support.grad.norm() > 0, "nothing was backpropagated"
-    assert k.grad is None or not k.grad.any(), f"{engine}: stiffness took a gradient"
+    with pytest.raises(ValueError, match="contact_stiffness"):
+        _make_sim(engine, t_horizon).predict_trajectory(
+            {"support": support, "friction": friction, "stiffness": 2.1e5}, ctrl, ctrl_ts
+        )
 
 
-def test_gradients_match_torch_on_a_stiffness_ramp():
-    """Only the input stiffness grid takes no gradient: the sampled stiffness
-    still varies with contact position, and both engines differentiate that.
-
-    Detaching it in torch gives a relative difference of 6.9e-3 here (CPU; under
-    1e-2 on every ramp tried, hence 1e-3); 2e-6 without.
-    """
+def test_gradients_match_torch_on_a_friction_ramp():
+    """A coefficient sampled under the wheels that varies with contact position:
+    both engines differentiate it the same way."""
     t_horizon = 100 * DT_TRAIN
     xs = torch.linspace(-MAX_COORD, MAX_COORD, GRID_N, device=DEVICE)
-    k = 2.1e5 * torch.exp(2.0 * xs).expand(1, GRID_N, GRID_N)  # e-fold per 0.5 m in x
+    mu = (0.6 + 0.3 * torch.tanh(2.0 * xs)).expand(1, GRID_N, GRID_N)
     grads = []
     for engine in ("torch", "warp"):
-        support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon, dt=DT_TRAIN)
+        support, _, ctrl, ctrl_ts = _make_inputs(t_horizon, dt=DT_TRAIN)
         sim = _make_sim(engine, t_horizon, dt=DT_TRAIN, robot="helhest_v2")
         traj, _, _, _ = sim.predict_trajectory(
-            {"support": support, "friction": friction, "stiffness": k}, ctrl, ctrl_ts
+            {"support": support, "friction": mu.clone()}, ctrl, ctrl_ts
         )
         traj[:, :, :3, 3].pow(2).sum().backward()
         grads.append(support.grad)
