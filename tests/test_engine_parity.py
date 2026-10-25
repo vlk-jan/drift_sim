@@ -40,11 +40,11 @@ GRAD_RATIO_RANGE_BATCHED = (0.9, 1.1)
 # Same-run floor: torch self-vs-self is bit-identical, warp 7.5e-9 m.
 SAME_RUN_ATOL = 1e-4
 # Support gradient vs central finite differences (eps 5e-4 m, 250 x 1e-3 s),
-# worst cell (both engines, CPU): flat 0.0063, rough 0.0065. eps is 5e-4 because
+# worst cell (both engines, CPU): flat 0.0076, rough 0.0034. eps is 5e-4 because
 # 32 rim points put neighbours within mm of touching, where a 2 mm step is
-# truncation error (flat 0.024 -> 0.017 -> 0.006 at 2e-3/1e-3/5e-4). Rough fails
-# a detached raise (0.071) and depth-independent touchdown damping (0.33), both
-# measured at eps 2e-3.
+# truncation error (flat 0.024 -> 0.017 -> 0.006 at 2e-3/1e-3/5e-4). A detached
+# seat fails both (flat 0.082, rough 0.42), depth-independent touchdown damping
+# too (flat 0.36, rough 0.13; torch).
 FD_REL_TOL = {"flat": 0.02, "rough": 0.06}
 
 
@@ -454,9 +454,9 @@ def _fd_rel_errors(engine, robot, terrain, eps=5e-4):
     grid centre).
 
     The start attitude is pinned (the plane fit is detached by design, see
-    Simulator.fit_plane_pose). The seed is 5 mm above ("flat") or into
-    ("rough") the terrain, as a GT-seeded training segment often is; the
-    differentiable seat sets the start height either way.
+    Simulator.fit_plane_pose). "flat": the robot drops from 5 mm above the
+    ground and touches down. "rough": the differentiable seat sets the start
+    height on the terrain, as for every GT-seeded training segment.
     """
     from models.simulator import _build_world_config
 
@@ -469,9 +469,13 @@ def _fd_rel_errors(engine, robot, terrain, eps=5e-4):
     with torch.no_grad():
         wc = _build_world_config(sim, {"support": support, "friction": friction})
         x0, q0 = sim.fit_plane_pose(wc, 1)
-        x0 = sim.seat_on_terrain(x0, q0, wc)
-        x0[:, 2] += 5e-3 if terrain == "flat" else -5e-3
     init = {"x": x0, "q": q0}
+    if terrain == "flat":
+        # The rollout re-seats any start, so the drop goes in after the seat:
+        # +1 cm over the 4.95 mm static sag.
+        seat = sim.seat_on_terrain
+        lift = torch.tensor([0.0, 0.0, 1e-2], device=DEVICE)
+        sim.seat_on_terrain = lambda x, q, wc: seat(x, q, wc) + lift
 
     traj, _, _, _ = sim.predict_trajectory(
         {"support": support, "friction": friction}, ctrl, ctrl_ts, initial_state=init
@@ -508,7 +512,7 @@ def test_gradient_matches_finite_differences(engine, robot, terrain):
 
     Catches both engines agreeing on the same mistake; torch is the parity
     reference and nothing else checks it. A contact force discontinuous at
-    touchdown makes the analytic gradient run 5-35 % low (rel errors up to 0.43
+    touchdown makes the analytic gradient run 5-35 % low (rel errors up to 0.36
     here); see FD_REL_TOL for the measured errors.
     """
     rels = _fd_rel_errors(engine, robot, terrain)
