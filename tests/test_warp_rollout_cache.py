@@ -51,16 +51,21 @@ def _run(sim, B=2, grid=32, n_ctrl=20, sup_scale=0.02):
     "batch", "horizon", "grid", "dt", "slip_ref_ratio", "slip_floor_velocity",
     "damping_alpha", "ang_damping", "torque_limit", "com_transfer", "robot",
 ])
-def test_changed_shape_or_scalar_never_replays_a_stale_graph(change):
+def test_changed_shape_or_scalar_never_replays_a_stale_graph(change, monkeypatch):
     """After a warm call, a call that differs in one key component equals the same
     call on an empty cache (a fresh capture), and differs from the warm result."""
-    from simulator import engine_wp
+    from dataclasses import replace
 
+    from simulator import engine_wp, utils
+
+    # Another robot: the v2 rig on 0.36 m wheels.
+    monkeypatch.setitem(utils.ROBOT_MODELS, "other", lambda: replace(
+        utils.helhest_v2_robot_model(), wheel_radii=torch.tensor([0.36] * 3)))
     kw = {}
 
     def setup():
         sim = make_sim(t_horizon=0.05, dt=0.005, engine="warp", max_coord=1.6,
-                       robot="helhest_v2" if change == "robot" else "helhest")
+                       robot="other" if change == "robot" else "helhest_v2")
         if change in ("dt", "slip_ref_ratio", "slip_floor_velocity", "damping_alpha",
                       "ang_damping", "torque_limit"):
             # Factors large enough that the term is active in this short rollout.

@@ -31,7 +31,7 @@ def _support_grad(engine, robot, steps, noise):
 
 
 @pytest.mark.parametrize("engine", ["torch", "warp"])
-@pytest.mark.parametrize("robot,noise_m", [("helhest", 0.05), ("helhest_v2", 0.10)])
+@pytest.mark.parametrize("robot,noise_m", [("helhest_v2", 0.10)])
 def test_contact_damping_gradient_is_bounded(engine, robot, noise_m):
     grad = _support_grad(engine, robot, 1000, noise_m)
     assert torch.isfinite(grad).all(), f"{engine} {robot}: non-finite gradient"

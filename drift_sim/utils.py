@@ -160,46 +160,6 @@ def num_sim_steps(T_horizon, dt) -> int:
 # --- Robot models: the single source of truth for wheel geometry ---
 # Anything needing wheel positions/radii must call robot_model_config() rather
 # than restate numbers: a stale copy puts contacts 0.2-0.4 m off the wheels.
-def helhest_robot_model() -> "RobotModelConfig":
-    """Return HELHEST's wheel geometry and mass properties.
-
-    WHEEL GEOMETRY IS THE URDF'S (`/robot_description`, latched in every bag).
-    base_link is the front axle: front wheels (0, +-0.36), rear (-0.697, 0),
-    radius 0.36. The published URDF reads the same out of a v1 and a v2 bag.
-
-    MASS, COG AND INERTIA ARE NOT THE URDF'S, and their source is not recorded.
-    The URDF's own links sum to 67.0 kg with the centre of mass 0.171 m behind
-    the front axle and inertia diag ~(3.38, 4.04, 7.17); this model carries
-    93.8 kg, 0.255 m and ~(8.65, 10.64, 19.29) -- 1.4x the mass and 2.6x the
-    inertia.
-
-    THE MASS HERE IS THE RIGHT ONE. The robot weighs about 96 kg, so 93.8 is
-    within 2-3% and the URDF is 30% low -- unsurprising, since its inertias are
-    exact uniform boxes and its battery is 2 kg. The COG and INERTIA remain
-    unverified (issue 36 in docs/METHOD.md): a weight does not fix either, and
-    inertia enters the transient response the trajectory loss scores.
-
-    THE URDF IS STALE IN OTHER RESPECTS, which is the reason not to adopt it
-    wholesale: the copy latched in a v2 bag still declares an Ouster
-    `os_sensor` and four e-CAM cameras, a sensor suite this robot does not
-    carry. Its wheel radius is stale for the same reason -- see
-    helhest_v2_robot_model.
-    """
-    return RobotModelConfig(
-        mass=93.8,
-        cog=torch.tensor([-0.255, 0.009, 0.0]),
-        wheel_radii=torch.tensor([0.36, 0.36, 0.36]),
-        wheel_centers=torch.tensor(
-            [[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]
-        ),
-        inertia_tensor=torch.tensor(
-            [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
-        ),
-        contact_stiffness=400_000.0,  # unmeasured guess; v1 tyres no longer exist
-        heightmap_datum_offset=0.0,  # unmeasured; v1 maps are legacy
-    )
-
-
 CONTACT_STIFFNESS_V2 = 210_000.0  # N/m, top of the measured range; see helhest_v2_robot_model
 # Median (height map - wheel-contact z) over driven cells of the paved Stromovka
 # training scenes 0000/0002 (4.3/3.8 cm; held-out 0001: 4.2): the lidar ground
@@ -216,15 +176,20 @@ HEIGHTMAP_DATUM_OFFSET_V2_MEDIAN = 0.032  # m
 def helhest_v2_robot_model() -> "RobotModelConfig":
     """Return HELHEST on the v2 rig (Odin1 + Fixposition).
 
-    Differs from helhest_robot_model() in the wheel RADIUS, which is 0.334 and
-    not the URDF's 0.36, and in the MASS: the v2 rig weighs 106 kg (the Odin1 +
-    Fixposition fit is heavier than the Livox rig). Inertia is scaled with the
-    mass (same geometry assumed; where the extra 13 kg sits is not measured),
-    cog is kept.
-
     WHEEL CENTRES are the URDF's and are trusted: `/robot_description` is a
     latched topic in every v2 bag, and bags from three different days all give
-    left (0, +0.36, 0), right (0, -0.36, 0), rear (-0.697, 0, 0).
+    left (0, +0.36, 0), right (0, -0.36, 0), rear (-0.697, 0, 0); base_link is
+    the front axle.
+
+    MASS 106 kg. COG AND INERTIA ARE NOT THE URDF'S, and their source is not
+    recorded: the URDF's links sum to 67.0 kg (exact uniform boxes, a 2 kg
+    battery) with the centre of mass 0.171 m behind the front axle and inertia
+    diag ~(3.38, 4.04, 7.17). The cog and inertia here are those of a 93.8 kg
+    model of the lighter Livox rig, the inertia scaled to 106 kg (where the
+    extra mass sits is not measured). Both remain unverified (issue 36 in
+    docs/METHOD.md); inertia enters the transient response the trajectory loss
+    scores. The URDF is stale in other respects too: it declares an Ouster
+    `os_sensor` and four e-CAM cameras this robot does not carry.
 
     THE RADIUS IS NOT. The URDF's 0.36 is helhest-common's `wheel_radius`
     (subtdata:/data/helhest/helhest-jr-workspaces.tar.gz), which predates this
@@ -274,14 +239,18 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
     from 8e5); slip_ref_ratio 0.1-0.2 tie (0.02 +0.2 cm, 0.4 +0.2 cm);
     slip_floor_velocity 0.01-0.2 m/s has no effect. mu 0.8-1.5 within 0.15 cm.
     """
-    base = helhest_robot_model()
     mass = 106.0
     return RobotModelConfig(
         mass=mass,
-        cog=base.cog,
+        cog=torch.tensor([-0.255, 0.009, 0.0]),
         wheel_radii=torch.tensor([0.334, 0.334, 0.334]),
-        wheel_centers=base.wheel_centers,
-        inertia_tensor=base.inertia_tensor * (mass / base.mass),
+        wheel_centers=torch.tensor(
+            [[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]
+        ),
+        inertia_tensor=torch.tensor(
+            [[8.65, -0.18, 0.0], [-0.18, 10.64, 0.0], [0.0, 0.0, 19.29]]
+        )
+        * (mass / 93.8),
         contact_stiffness=CONTACT_STIFFNESS_V2,
         heightmap_datum_offset=HEIGHTMAP_DATUM_OFFSET_V2,
     )
@@ -303,13 +272,12 @@ def helhest_v2_median_robot_model() -> "RobotModelConfig":
 
 
 ROBOT_MODELS = {
-    "helhest": helhest_robot_model,
     "helhest_v2": helhest_v2_robot_model,
     "helhest_v2_median": helhest_v2_median_robot_model,
 }
 
 
-def robot_model_config(robot: str = "helhest") -> "RobotModelConfig":
+def robot_model_config(robot: str) -> "RobotModelConfig":
     """Return wheel geometry, mass and inertia of a supported robot."""
     try:
         return ROBOT_MODELS[robot]()
@@ -587,10 +555,10 @@ def generate_controls(
 ):
     """Generate random-walk angular wheel velocities.
 
-    wheel_radius (default: helhest URDF) converts linear speed to rad/s.
+    wheel_radius (default: the v2 rig's) converts linear speed to rad/s.
     """
     if wheel_radius is None:
-        wheel_radius = float(robot_model_config("helhest").wheel_radii[0])
+        wheel_radius = float(robot_model_config("helhest_v2").wheel_radii[0])
     torch.manual_seed(seed)
     steps = int(duration / dt)
     controls = []
@@ -630,7 +598,7 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
     controls = []
     timestamps = []
 
-    wheel_radius = float(robot_model_config("helhest").wheel_radii[0])
+    wheel_radius = float(robot_model_config("helhest_v2").wheel_radii[0])
     max_speed_lin = 5.0  # m/s
     max_omega = max_speed_lin / wheel_radius
 
@@ -830,15 +798,13 @@ def add_helhest_visual_body(scene, name: str = "box", **kwargs) -> None:
     )
 
 
-def add_helhest_visual_wheels(
-    scene, parent: str = "box", robot: str = "helhest"
-) -> None:
+def add_helhest_visual_wheels(scene, parent: str, robot: str) -> None:
     """Add rigidly attached visual wheels for Helhest to a SimView scene.
 
     Geometry comes from robot_model_config(robot) so drawn wheels match the
-    simulated contacts; pass the robot the rollout used, since the v1 and v2
-    models differ by 26 mm of radius. Hubs are expressed relative to the drawn
-    chassis body, which sits HELHEST_CHASSIS_CENTER behind base_link.
+    simulated contacts; pass the robot the rollout used. Hubs are expressed
+    relative to the drawn chassis body, which sits HELHEST_CHASSIS_CENTER
+    behind base_link.
     """
     from simview import BodyShapeType, SimViewBody
 

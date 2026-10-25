@@ -77,7 +77,7 @@ def _apply_initial_state_override(state, initial_state, device):
 class Simulator(torch.nn.Module):
     def __init__(
         self,
-        robot="helhest",
+        robot="helhest_v2_median",
         device=None,
         T_horizon=1.0,
         dt=2e-3,  # see PhysicsEngineConfig.dt / scripts/analysis/sweep_dt.py

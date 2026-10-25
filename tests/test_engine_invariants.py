@@ -68,7 +68,7 @@ def test_impulse_cut_is_inert_while_driving():
     """
     from simulator.utils import PhysicsState, WorldConfig
 
-    def cut_steps(robot="helhest", omega=(3.0, 3.0, 3.0), t=0.2, dt=2e-3):
+    def cut_steps(robot="helhest_v2", omega=(3.0, 3.0, 3.0), t=0.2, dt=2e-3):
         sim = _make_sim_factory(
             t, dt, com_transfer=True, max_coord=MAX_COORD, robot=robot
         )

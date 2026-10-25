@@ -10,8 +10,8 @@ front of the front wheels and stops 0.2 m short of the rear one.
 The envelope asserted here is dataset_tools' viewer's (CHASSIS / CHASSIS_CENTER
 in dataset_tools/viewer/build.py), so the same robot is drawn in both tools.
 It is deliberately NOT the URDF's base_link box (`0.26 0.6 0.18` at
-`-0.047 0 0`, identical in the v1 and v2 bags): that is the
-frame member alone, without motors, battery or wheel forks.
+`-0.047 0 0`): that is the frame member alone, without motors, battery or
+wheel forks.
 """
 
 import numpy as np
@@ -53,7 +53,7 @@ class FakeScene:
 def test_the_box_reaches_the_front_sensor_but_not_past_the_front_wheels():
     back, front = box_span()
     assert front >= FRONT_SENSOR_X, "the box stops short of the front fixtures"
-    r = robot_model_config("helhest").wheel_radii[0].item()
+    r = robot_model_config("helhest_v2").wheel_radii[0].item()
     assert front < r, "the box juts out past the front wheels' own outline"
 
 
@@ -65,33 +65,32 @@ def test_the_box_covers_the_rear_wheel_fork():
 def test_the_box_does_not_reach_the_rear_wheel_hub():
     """It is a chassis, not a bounding box: the rear wheel hangs off a fork."""
     back, _ = box_span()
-    rear_hub = robot_model_config("helhest").wheel_centers[2, 0].item()
+    rear_hub = robot_model_config("helhest_v2").wheel_centers[2, 0].item()
     assert back > rear_hub
 
 
 def test_the_box_is_narrow_enough_to_clear_the_tyres():
-    track = robot_model_config("helhest").wheel_centers[0, 1].item()
+    track = robot_model_config("helhest_v2").wheel_centers[0, 1].item()
     assert HELHEST_CHASSIS["hy"] < track - WHEEL_VISUAL_WIDTH / 2.0
 
 
 def test_the_box_sits_within_the_wheels_vertically():
-    assert HELHEST_CHASSIS["hz"] < robot_model_config("helhest").wheel_radii[0].item()
+    assert HELHEST_CHASSIS["hz"] < robot_model_config("helhest_v2").wheel_radii[0].item()
 
 
 def test_the_old_centred_box_would_fail_these():
     """Guards the regression, not the fix: a box centred on base_link must not pass."""
     old_front = 0.5
-    assert old_front > robot_model_config("helhest").wheel_radii[0].item()
+    assert old_front > robot_model_config("helhest_v2").wheel_radii[0].item()
 
 
 # --- the wheels land on the axles despite the offset ---
 
 
-@pytest.mark.parametrize("robot", ["helhest", "helhest_v2"])
-def test_drawn_hubs_undo_the_chassis_offset(robot):
+def test_drawn_hubs_undo_the_chassis_offset():
     scene = FakeScene()
-    add_helhest_visual_wheels(scene, "box", robot=robot)
-    model = robot_model_config(robot)
+    add_helhest_visual_wheels(scene, "box", robot="helhest_v2")
+    model = robot_model_config("helhest_v2")
     assert len(scene.bodies) == 3
     for body, want in zip(scene.bodies, model.wheel_centers.tolist()):
         hub = np.array(body.local_transform[:3]) + np.array(HELHEST_CHASSIS_CENTER)
@@ -99,13 +98,11 @@ def test_drawn_hubs_undo_the_chassis_offset(robot):
 
 
 def test_drawn_wheels_use_the_radius_of_the_robot_asked_for():
-    """v1 and v2 differ by 26 mm; a scene drawn with the wrong one lies."""
-    for robot in ("helhest", "helhest_v2"):
-        scene = FakeScene()
-        add_helhest_visual_wheels(scene, "box", robot=robot)
-        want = robot_model_config(robot).wheel_radii[0].item()
-        for body in scene.bodies:
-            assert body.shape["radius"] == pytest.approx(want)
+    scene = FakeScene()
+    add_helhest_visual_wheels(scene, "box", robot="helhest_v2")
+    want = robot_model_config("helhest_v2").wheel_radii[0].item()
+    for body in scene.bodies:
+        assert body.shape["radius"] == pytest.approx(want)
 
 
 # --- the body that carries the trajectory is the box, not base_link ---
@@ -149,7 +146,7 @@ def test_contact_points_move_into_the_box_frame():
 
 def test_a_wheel_contact_point_lands_under_its_hub():
     """The end-to-end check: hub offset + contact offset = the real contact."""
-    model = robot_model_config("helhest")
+    model = robot_model_config("helhest_v2")
     hub = model.wheel_centers[0].numpy()
     contact_base = hub - np.array([0.0, 0.0, model.wheel_radii[0].item()])
     in_box = chassis_local(contact_base[None])[0]

@@ -14,7 +14,7 @@ from _helpers import make_sim as _make_sim_factory
 
 # Warp has a CPU device too: the suite runs on CUDA when present, else on CPU.
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-ROBOTS = ("helhest", "helhest_v2")
+ROBOTS = ("helhest_v2",)
 GRID_N = 128
 RES = 0.1
 MAX_COORD = GRID_N * RES / 2 - RES / 2  # outermost cell centre, as world_cfg_from_config: 6.35
@@ -49,7 +49,7 @@ SAME_RUN_ATOL = 1e-4
 FD_REL_TOL = {"flat": 0.02, "rough": 0.06}
 
 
-def _make_sim(engine, t_horizon, batch_size=1, dt=DT, robot="helhest"):
+def _make_sim(engine, t_horizon, batch_size=1, dt=DT, robot="helhest_v2"):
     return _make_sim_factory(
         t_horizon, dt, engine=engine, device=DEVICE, max_coord=MAX_COORD,
         eval_mode=False, robot=robot,
@@ -94,7 +94,7 @@ def _rollout(
     distinct_batch=False,
     dt=DT,
     flat=False,
-    robot="helhest",
+    robot="helhest_v2",
 ):
     """Run one rollout and backprop a trajectory loss.
 
@@ -613,13 +613,13 @@ def test_wheel_geometry_has_one_source():
     from models.simulator_wp import Simulator as WarpSim
     from simulator.utils import robot_model_config
 
-    ref = robot_model_config("helhest")
+    ref = robot_model_config("helhest_v2")
     assert torch.allclose(
         ref.wheel_centers,
         torch.tensor([[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]),
     ), "the source of truth no longer matches the URDF tuple"
     for cls in (TorchSim, WarpSim):
-        sim = cls(robot="helhest", device="cpu")
+        sim = cls(robot="helhest_v2", device="cpu")
         assert torch.equal(sim.robot_model.wheel_centers, ref.wheel_centers)
         assert torch.equal(sim.robot_model.wheel_radii, ref.wheel_radii)
         assert torch.equal(sim.robot_model.cog, ref.cog)
