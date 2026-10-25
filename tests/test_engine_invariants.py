@@ -83,7 +83,7 @@ def test_impulse_cut_is_inert_while_driving():
         )
         state = PhysicsState.dummy(batch_size=1, device="cpu")
         state.x, state.q = sim.fit_plane_pose(world, 1)
-        state.x = sim.raise_to_clearance(state.x, state.q, world)
+        state.x = sim.seat_on_terrain(state.x, state.q, world)
         n = 0
         with torch.no_grad():
             for _ in range(int(t / dt)):
@@ -141,7 +141,7 @@ def test_step_normal_force_ignores_wheel_spin(engine):
     dt = 2e-3
     sim = _make_sim_factory(dt, dt, engine=engine, device=device,
                             max_coord=MAX_COORD - RES / 2, robot="helhest_v2")
-    sim.raise_to_clearance = lambda x, q, wc: x  # keep the pressed-in start
+    sim.seat_on_terrain = lambda x, q, wc: x  # keep the pressed-in start
     xs = torch.linspace(-sim.max_coord, sim.max_coord, GRID_N)
     S = torch.zeros(1, GRID_N, GRID_N)
     S[..., xs > 0.2] = 0.04  # step ahead of the front axle (last grid axis is x)
@@ -170,3 +170,38 @@ def test_step_normal_force_ignores_wheel_spin(engine):
         assert torch.allclose(F, F0, rtol=1e-4, atol=1e-2), (
             f"{engine}: wheel spin {omega} rad/s changed the contact force {F0} -> {F}"
         )
+
+
+@pytest.mark.parametrize("engine", ["torch", "warp"])
+def test_a_seeded_start_is_seated_on_its_sag(engine):
+    """A GT-seeded start begins at rest on its static sag, not at zero depth.
+
+    Flat ground, standing still: from a level start only the static loads'
+    ~1 mrad tilt is left to settle (z within 0.5 mm; at zero depth it sank
+    4.7 mm), and from the settled attitude nothing moves at all.
+    """
+    from utils.geometry import rotmat_to_quat_batch
+
+    dt, t = 2e-3, 0.6
+    sim = _make_sim_factory(t, dt, engine=engine, max_coord=MAX_COORD - RES / 2,
+                            eval_mode=False, robot="helhest_v2")
+    r = float(sim.robot_model.wheel_radii[0])
+    props = _flat_props(mu=0.8)
+    ctrl = torch.zeros(1, 2, 3)
+    ts = torch.tensor([[0.0, t]], dtype=torch.float64)
+
+    def run(q):
+        init = {"x": torch.tensor([[0.0, 0.0, r - 0.03]]), "q": q,
+                "xd": torch.zeros(1, 3), "omega": torch.zeros(1, 3)}
+        with torch.no_grad():
+            T, _, _, _ = sim.predict_trajectory(
+                props, ctrl, ts, initial_state=init, include_start=True
+            )
+        return T[0]
+
+    T = run(torch.tensor([[1.0, 0.0, 0.0, 0.0]]))
+    z = T[:, 2, 3]
+    assert (z - z[-1]).abs().max() < 5e-4, f"{engine}: z settles {(z - z[-1]).abs().max():.2e} m"
+    T = run(rotmat_to_quat_batch(T[-1, :3, :3].unsqueeze(0)))
+    drift = (T[:, :3, 3] - T[0, :3, 3]).norm(dim=-1).max()
+    assert drift < 2e-5, f"{engine}: a start at the static attitude moved {drift:.2e} m"

@@ -484,28 +484,44 @@ def find_init_rob_position(
     return x, q
 
 
-def raise_to_clearance(engine, x, q, world_config):
-    """Raise the robot until all wheel circumference sample points clear the terrain.
+def seat_on_terrain(engine, x, q, world_config):
+    """Shift the robot vertically so it starts at rest on its static sag.
 
-    The plane fit only makes the wheel triangle tangent; circumference points can
-    still penetrate and the contact springs launch the robot at t=0. Returns a new
-    position (`x` may be a view into GT data).
+    A vertical shift leaves every rim point's xy, so after lifting by s each
+    wheel's deepest penetration is G_w - s, with G_w its largest vertical gap
+    terrain_z - point_z now. Each wheel is a spring of k / n_wheels on that depth
+    (simulator/engine.py::_calculate_spring_force), so the springs carry the
+    robot's weight when sum_w relu(G_w - s) = m g n_wheels / k. Over the wheels
+    sorted deepest first, every s_j = (sum_{i<=j} G_i - m g n_wheels / k) / j
+    bounds the solution from below and the actual contact set attains it, so
+    s = max_j s_j: closed form, one step. The vertical gap is the normal depth
+    over n_z and the normal forces sum to m g n_z, so the same sum holds on a
+    uniform slope whose friction carries the downhill load.
 
-    A vertical lift leaves every point's xy, so the exact lift is the largest
-    vertical gap terrain_z - point_z (dh / nz), in one step. Differentiable in
-    the terrain: the start height is a function of the support under the
-    deepest point, and a detached lift makes the support gradient disagree with
-    finite differences (cos 0.98 instead of 1.000 at 2 s, rough ground,
-    GT-seeded start).
-    The attitude is not differentiated (see Simulator.fit_plane_pose). `engine`
-    only supplies geometry, so both simulator wrappers share this.
+    Flat ground at a consistent attitude seats every wheel at m g / k (4.95 mm
+    at 2.1e5 N/m). Seated at zero depth instead, every GT-seeded segment sank
+    ~4.7 mm onto its sag within 0.1 s, a transient the GT does not have. A
+    start above the terrain is lowered onto it too. The attitude is kept (GT or
+    the plane fit), so a tilt the static loads disagree with still settles.
+
+    Differentiable in the terrain: the start height is a function of the support
+    under each wheel's deepest point; a detached lift makes the support gradient
+    disagree with finite differences (cos 0.98 instead of 1.000 at 2 s, rough
+    ground, GT-seeded start). The attitude is not differentiated (see
+    Simulator.fit_plane_pose). `engine` only supplies geometry and the robot's
+    constants, so both simulator wrappers share this. Returns a new position
+    (`x` may be a view into GT data).
     """
     R_body = quat_to_rotmat(q.detach())  # (B, 3, 3)
     wp_rel = torch.einsum("bij,wpj->bwpi", R_body, engine._wheel_pos_rel)  # (B,W,P,3)
     wc_world = (R_body @ engine._wheel_centers.T).transpose(-1, -2) + x.unsqueeze(1)
     dh, normals, _ = engine._sample_terrain(wp_rel + wc_world.unsqueeze(2), world_config)
     gap = -dh / normals[..., 2:3].clamp_min(1e-3)  # vertical gap, (B, W, P, 1)
-    lift = gap.flatten(1).max(dim=1).values.clamp_min(0)  # (B,)
+    G = gap.squeeze(-1).amax(dim=2).sort(dim=1, descending=True).values  # (B, W)
+    n = G.shape[1]
+    sag_sum = engine._mass * engine.config.g * n / engine.robot_model.contact_stiffness
+    j = torch.arange(1, n + 1, device=G.device, dtype=G.dtype)
+    lift = ((G.cumsum(dim=1) - sag_sum) / j).amax(dim=1)  # (B,)
     return x + torch.stack([torch.zeros_like(lift), torch.zeros_like(lift), lift], -1)
 
 

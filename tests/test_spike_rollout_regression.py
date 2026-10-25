@@ -4,9 +4,10 @@ with row 51 (segment 3, same sample) as a normal row. data/spike_rollout_b41.pt
 holds both rows' simulator inputs and the final pose each reaches.
 
 Row 83 is the field case of tests/test_low_slip_gradient.py. With the exact
-slip-direction derivative its gradient here is 1.6e16 (torch) and 1.8e16 (warp)
-instead of 29, and a 1e-8 m support field scales it by 1.6 (torch) and 0.1
-(warp).
+slip-direction derivative its gradient here is 7e8 (torch) and 7e7 (warp)
+instead of 22, and a 1e-8 m support field scales it by 1.5 (torch) and 15
+(warp). The final poses are the seated start's (simulator/utils.py::
+seat_on_terrain), torch's.
 """
 
 from pathlib import Path
@@ -18,10 +19,10 @@ from _helpers import make_sim
 FIXTURE = Path(__file__).parent / "data" / "spike_rollout_b41.pt"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Support gradient norms of the summed squared positions (test_engine_parity's
-# loss): 29 (row 83) and 21 (row 51) in both engines.
+# loss): 22 (row 83) and 22 (row 51) in both engines.
 GRAD_NORM_MAX = 1e3
 # The stick-slip at rest is rounding-sensitive: ten 1e-8 m support fields move
-# the final pose by up to 6e-5 m, and warp ends 3e-5 m off the torch reference.
+# the final pose by up to 9e-6 m, and warp ends 7e-6 m off the torch reference.
 POSE_ATOL = 2e-4
 
 

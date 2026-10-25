@@ -68,8 +68,10 @@ def test_changed_shape_or_scalar_never_replays_a_stale_graph(change, monkeypatch
                        robot="other" if change == "robot" else "helhest_v2")
         if change in ("dt", "slip_ref_ratio", "slip_floor_velocity", "damping_alpha",
                       "ang_damping", "torque_limit"):
-            # Factors large enough that the term is active in this short rollout.
-            f = {"slip_floor_velocity": 20.0, "torque_limit": 1e-4}.get(change, 1.5)
+            # Factors large enough that the term is active in this short rollout;
+            # the damping cap binds at rest at alpha 2.0, so alpha goes below it.
+            f = {"slip_floor_velocity": 20.0, "torque_limit": 1e-4,
+                 "damping_alpha": 0.25}.get(change, 1.5)
             setattr(sim.engine_config, change, getattr(sim.engine_config, change) * f)
         if change == "com_transfer":
             sim.engine_config.com_transfer = not sim.engine_config.com_transfer

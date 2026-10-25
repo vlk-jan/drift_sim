@@ -297,9 +297,9 @@ def test_initial_pose_override_is_honoured(engine):
 
 
 @pytest.mark.parametrize("engine", ["torch", "warp"])
-def test_include_start_prepends_the_raised_start(engine):
+def test_include_start_prepends_the_seated_start(engine):
     """include_start returns the state the rollout steps from first, at vel_ts[:, 0]:
-    the seed raised to clearance (the segmented loss anchors on it), its seeded
+    the seed seated on the terrain (the segmented loss anchors on it), its seeded
     velocities; the steps after it are the default call's."""
     from models.simulator import _build_world_config
 
@@ -321,11 +321,11 @@ def test_include_start_prepends_the_raised_start(engine):
         assert torch.allclose(f[:, 1:], b, atol=SAME_RUN_ATOL), engine
 
     pose, ts, xd, omega = (o[:, 0] for o in full)
-    raised = sim.raise_to_clearance(
+    seated = sim.seat_on_terrain(
         init["x"], init["q"], _build_world_config(sim, props)
     )
-    assert raised[0, 2] > 0.01, "the seed must start below ground to test the lift"
-    assert torch.allclose(pose[:, :3, 3], raised, atol=1e-6), engine
+    assert seated[0, 2] > 0.01, "the seed must start below ground to test the seat"
+    assert torch.allclose(pose[:, :3, 3], seated, atol=1e-6), engine
     assert torch.allclose(pose[:, :3, :3], torch.eye(3, device=DEVICE)), engine
     assert torch.equal(ts, ctrl_ts[:, 0].double())
     assert torch.equal(xd, init["xd"]) and torch.equal(omega, init["omega"])
@@ -385,7 +385,7 @@ def test_rest_start_gradients_match_torch():
     grads = {}
     for engine in ("torch", "warp"):
         sim = _make_sim(engine, t_horizon, dt=DT_TRAIN, robot="helhest_v2")
-        sim.raise_to_clearance = lambda x, q, wc: x  # keep the sag
+        sim.seat_on_terrain = lambda x, q, wc: x  # keep the sag
         rm = sim.robot_model
         z_rest = float(rm.wheel_radii[0]) - rm.mass * 9.81 / rm.contact_stiffness
         init = {
@@ -454,10 +454,9 @@ def _fd_rel_errors(engine, robot, terrain, eps=5e-4):
     grid centre).
 
     The start attitude is pinned (the plane fit is detached by design, see
-    Simulator.fit_plane_pose). "flat": the start is 5 mm above the ground, so
-    the robot drops and touches down. "rough": the start pose is 5 mm INTO
-    the terrain, as a GT-seeded training segment often is, so the
-    differentiable clearance raise sets the start height.
+    Simulator.fit_plane_pose). The seed is 5 mm above ("flat") or into
+    ("rough") the terrain, as a GT-seeded training segment often is; the
+    differentiable seat sets the start height either way.
     """
     from models.simulator import _build_world_config
 
@@ -470,7 +469,7 @@ def _fd_rel_errors(engine, robot, terrain, eps=5e-4):
     with torch.no_grad():
         wc = _build_world_config(sim, {"support": support, "friction": friction})
         x0, q0 = sim.fit_plane_pose(wc, 1)
-        x0 = sim.raise_to_clearance(x0, q0, wc)
+        x0 = sim.seat_on_terrain(x0, q0, wc)
         x0[:, 2] += 5e-3 if terrain == "flat" else -5e-3
     init = {"x": x0, "q": q0}
 

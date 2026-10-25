@@ -15,8 +15,8 @@ from simulator.utils import (
     WorldConfig,
     find_init_rob_position,
     num_sim_steps,
-    raise_to_clearance,
     robot_model_config,
+    seat_on_terrain,
 )
 from utils.geometry import quat_to_rotmat
 
@@ -69,9 +69,9 @@ class Simulator(torch.nn.Module):
             world_config, self.robot_model, batch_size, self.device
         )
 
-    def raise_to_clearance(self, x, q, world_config: WorldConfig):
-        """Lift the robot clear of the terrain. See simulator/utils.py."""
-        return raise_to_clearance(self._geom, x, q, world_config)
+    def seat_on_terrain(self, x, q, world_config: WorldConfig):
+        """Seat the robot on its static sag. See simulator/utils.py."""
+        return seat_on_terrain(self._geom, x, q, world_config)
 
     def predict_trajectory(
         self,
@@ -125,9 +125,9 @@ class Simulator(torch.nn.Module):
         # Seeds segmented-loss segments at their GT start pose.
         state = _apply_initial_state_override(state, initial_state, self.device)
 
-        # Without this the wheel circumference points start inside rough terrain
-        # and the contact springs launch the robot at t=0.
-        state.x = self.raise_to_clearance(state.x, state.q, world_config)
+        # Starts at rest on the static sag: a deep start launches the robot at
+        # t=0, a start at zero depth sinks onto the sag.
+        state.x = self.seat_on_terrain(state.x, state.q, world_config)
 
         sim_dt = self.engine_config.dt
         horizon = self.T_horizon if T_horizon is None else T_horizon

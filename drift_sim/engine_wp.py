@@ -761,8 +761,8 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
         need = ctx.needs_input_grad
         # The initial state's adjoint is what the tape left in state_*.grad[0]
-        # (x0 takes one through the clearance raise, simulator/utils.py::
-        # raise_to_clearance; the rest when a caller seeds them with grad).
+        # (x0 takes one through the seat, simulator/utils.py::
+        # seat_on_terrain; the rest when a caller seeds them with grad).
         init = [
             wp.to_torch(s.grad)[0].clone() if need[i] else None
             for i, s in enumerate(ro.state)

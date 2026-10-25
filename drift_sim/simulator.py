@@ -9,8 +9,8 @@ from simulator.utils import (
     WorldConfig,
     find_init_rob_position,
     num_sim_steps,
-    raise_to_clearance,
     robot_model_config,
+    seat_on_terrain,
 )
 from utils.geometry import quat_to_rotmat
 
@@ -200,17 +200,17 @@ class Simulator(torch.nn.Module):
             world_config, self.robot_model, batch_size, self.device
         )
 
-    def raise_to_clearance(
+    def seat_on_terrain(
         self, x: torch.Tensor, q: torch.Tensor, world_config: WorldConfig
     ) -> torch.Tensor:
-        """Raise the robot until all wheel circumference points clear the terrain.
+        """Shift the robot vertically onto its static sag on the terrain.
 
-        The plane fit only makes the wheel triangle tangent; on curved terrain the
-        circumference points penetrate and the contact springs launch the robot at
-        t=0. Returns a new position (`x` may be a view into GT data). Shared with
+        A GT seed or the plane fit puts the rim points at arbitrary depth: deep
+        ones launch the robot at t=0, and a start at zero depth sinks onto the
+        sag. Returns a new position (`x` may be a view into GT data). Shared with
         the warp wrapper via simulator/utils.py.
         """
-        return raise_to_clearance(self.engine, x, q, world_config)
+        return seat_on_terrain(self.engine, x, q, world_config)
 
     def predict_trajectory(
         self,
@@ -240,7 +240,7 @@ class Simulator(torch.nn.Module):
         T_horizon : float, optional
             Simulation horizon; defaults to self.T_horizon.
         include_start : bool, optional
-            Also return the start state (raised to clearance) first, stamped
+            Also return the start state (seated on the terrain) first, stamped
             vel_ts[b, 0], so a loss can anchor on the state the rollout starts
             from. Outputs then have SimSteps + 1 entries.
 
@@ -267,7 +267,7 @@ class Simulator(torch.nn.Module):
 
         state = _apply_initial_state_override(state, initial_state, self.device)
 
-        state.x = self.raise_to_clearance(state.x, state.q, world_config)
+        state.x = self.seat_on_terrain(state.x, state.q, world_config)
 
         vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts, T_horizon=T_horizon)
 
