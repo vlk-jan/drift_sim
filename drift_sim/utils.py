@@ -430,9 +430,9 @@ def find_init_rob_position(
 
     q = q_identity.clone()
     x = torch.zeros(batch_size, 3, device=device)
+    R_mat = quat_to_rotmat(q)  # (B, 3, 3)
 
     for _ in range(10):
-        R_mat = quat_to_rotmat(q)  # (B, 3, 3)
         wc_world = torch.einsum("bij,kj->bki", R_mat, wheel_centers) + x.unsqueeze(
             1
         )  # (B, 3, 3)
@@ -475,7 +475,9 @@ def find_init_rob_position(
 
         # Fixed passes, no early exit: converged iterates are fixed points, and a
         # convergence test would cost device->host syncs.
-        q, x = q_new, x_new
+        # R_new is the next pass's R_mat: one quat_to_rotmat per pass (~35 small
+        # ops, launch-bound on GPU).
+        q, x, R_mat = q_new, x_new, R_new
 
     return x, q
 
