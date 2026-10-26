@@ -1,4 +1,5 @@
 import math
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Tuple, Union
 
@@ -145,7 +146,9 @@ def num_sim_steps(T_horizon, dt) -> int:
 # --- Robot models: the single source of truth for wheel geometry ---
 # Anything needing wheel positions/radii must call robot_model_config() rather
 # than restate numbers: a stale copy puts contacts 0.2-0.4 m off the wheels.
-CONTACT_STIFFNESS_V2 = 210_000.0  # N/m, top of the measured range; see helhest_v2_robot_model
+CONTACT_STIFFNESS_V2 = (
+    210_000.0  # N/m, top of the measured range; see helhest_v2_robot_model
+)
 # Median (height map - wheel-contact z) over driven cells of the paved Stromovka
 # training scenes 0000/0002 (4.3/3.8 cm; held-out 0001: 4.2): the lidar ground
 # sits above axle - r on rigid ground. This is the datum of the p90 maps of
@@ -399,37 +402,25 @@ class PhysicsStateDer:
 
 
 # --- Other functions ---
-def find_init_rob_position(
-    world_config: WorldConfig,
-    robot_model: RobotModelConfig,
-    batch_size: int,
-    device: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Find the initial pose with all 3 wheels resting on the terrain.
+def _plane_fit(
+    z_grid,
+    grid_center,
+    max_coord,
+    wheel_centers,
+    R_wheel,
+    q_identity,
+    q_flip,
+    z_up,
+    batch_size,
+):
+    """Device-only plane fit; see find_init_rob_position.
 
-    Iterates: sample terrain under the wheel centres, fit the plane through
-    terrain_z + R, align the body up-axis with its normal, and set the height so
-    no wheel is below its target (converges in ~3-5 iterations).
-
-    Returns:
-        x_init: (B, 3)  world position of the body origin
-        q_init: (B, 4)  unit quaternion [w, x, y, z]
+    Every argument must already live on the target device. CUDA graph capture
+    records a host->device copy as a read from a dangling host pointer, so no
+    constants may be created inside this function.
     """
-    # Host constants go over asynchronously: no host sync in the fit.
-    def to_device(x):
-        return torch.as_tensor(x, dtype=torch.float32).to(device, non_blocking=True)
-
-    grid_center = world_config.grid_center.to(device)
-    wheel_centers = to_device(robot_model.wheel_centers)  # (3, 3)
-    wheel_radii = to_device(robot_model.wheel_radii)
-    R_wheel = wheel_radii.mean()
-
-    q_identity = to_device([1.0, 0.0, 0.0, 0.0]).expand(batch_size, 4)
-    q_flip = to_device([0.0, 1.0, 0.0, 0.0]).expand(batch_size, 4)
-    z_up = to_device([[0.0, 0.0, 1.0]]).expand(batch_size, 3)
-
     q = q_identity.clone()
-    x = torch.zeros(batch_size, 3, device=device)
+    x = torch.zeros(batch_size, 3, device=z_grid.device)
     R_mat = quat_to_rotmat(q)  # (B, 3, 3)
 
     for _ in range(10):
@@ -439,9 +430,9 @@ def find_init_rob_position(
         wc_xy = wc_world[:, :, :2]  # (B, 3, 2)
 
         z_terrain = interpolate_grid(
-            world_config.z_grid,
+            z_grid,
             wc_xy - grid_center,
-            world_config.max_coord,
+            max_coord,
         ).reshape(batch_size, 3)  # (B, 3)
 
         # Plane through the desired wheel-centre heights.
@@ -470,7 +461,7 @@ def find_init_rob_position(
         wc_rot_z = torch.einsum("bi,ki->bk", R_new[:, 2, :], wheel_centers)  # (B, 3)
         z_new = (wc_z_target - wc_rot_z).max(dim=1).values  # (B,)
 
-        x_new = torch.zeros(batch_size, 3, device=device)
+        x_new = torch.zeros(batch_size, 3, device=z_grid.device)
         x_new[:, 2] = z_new
 
         # Fixed passes, no early exit: converged iterates are fixed points, and a
@@ -480,6 +471,130 @@ def find_init_rob_position(
         q, x, R_mat = q_new, x_new, R_new
 
     return x, q
+
+
+def _robot_key(robot_model, device):
+    # The fit reads the wheel centres and the mean wheel radius; other robot
+    # fields cannot change its result.
+    return (
+        str(device),
+        tuple(robot_model.wheel_centers.detach().cpu().reshape(-1).tolist()),
+        tuple(robot_model.wheel_radii.detach().cpu().reshape(-1).tolist()),
+    )
+
+
+def _plane_fit_constants(robot_model, device):
+    def to_device(x):
+        return torch.as_tensor(x, dtype=torch.float32).to(device)
+
+    return {
+        "wheel_centers": to_device(robot_model.wheel_centers),
+        "R_wheel": to_device(robot_model.wheel_radii.mean()),
+        "q_identity": to_device([1.0, 0.0, 0.0, 0.0]),
+        "q_flip": to_device([0.0, 1.0, 0.0, 0.0]),
+        "z_up": to_device([0.0, 0.0, 1.0]),
+    }
+
+
+_PLANE_CONSTANTS = OrderedDict()
+_PLANE_FITS = OrderedDict()
+_MAX_PLANE_FITS = 8
+
+
+def find_init_rob_position(
+    world_config: WorldConfig,
+    robot_model: RobotModelConfig,
+    batch_size: int,
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Find the initial pose with all 3 wheels resting on the terrain.
+
+    Iterates: sample terrain under the wheel centres, fit the plane through
+    terrain_z + R, align the body up-axis with its normal, and set the height so
+    no wheel is below its target (converges in ~3-5 iterations).
+
+    Returns:
+        x_init: (B, 3)  world position of the body origin
+        q_init: (B, 4)  unit quaternion [w, x, y, z]
+    """
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    with torch.no_grad():
+        robot_key = _robot_key(robot_model, device)
+        constants = _PLANE_CONSTANTS.get(robot_key)
+        if constants is None:
+            # Make constants before capture: a host->device copy inside a CUDA
+            # graph records a read from a dangling host pointer.
+            constants = _plane_fit_constants(robot_model, device)
+            _PLANE_CONSTANTS[robot_key] = constants
+        constants = {
+            **constants,
+            # Expanding a cached device tensor is a view, so this remains safe
+            # inside a CUDA graph capture.
+            "q_identity": constants["q_identity"].expand(batch_size, 4),
+            "q_flip": constants["q_flip"].expand(batch_size, 4),
+            "z_up": constants["z_up"].expand(batch_size, 3),
+        }
+
+        if device.type != "cuda":
+            return _plane_fit(
+                world_config.z_grid,
+                world_config.grid_center.to(device),
+                world_config.max_coord,
+                batch_size=batch_size,
+                **constants,
+            )
+
+        key = (
+            robot_key,
+            batch_size,
+            tuple(world_config.z_grid.shape),
+            str(device),
+        )
+        fit = _PLANE_FITS.pop(key, None)
+        if fit is None:
+            if len(_PLANE_FITS) >= _MAX_PLANE_FITS:
+                _PLANE_FITS.pop(next(iter(_PLANE_FITS)))
+
+            # The eager fit is ~1100 tiny launches (~20 ms on an RTX 3090);
+            # replaying the captured graph is ~1.3 ms. Warm up outside capture,
+            # as torch.cuda.graph requires.
+            z_grid = world_config.z_grid.clone()
+            grid_center = world_config.grid_center.to(device).clone()
+            max_coord = world_config.max_coord.to(device).clone()
+            side_stream = torch.cuda.Stream(device=device)
+            side_stream.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(side_stream):
+                for _ in range(3):
+                    _plane_fit(
+                        z_grid,
+                        grid_center,
+                        max_coord,
+                        batch_size=batch_size,
+                        **constants,
+                    )
+            torch.cuda.current_stream(device).wait_stream(side_stream)
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.device(device):
+                with torch.cuda.graph(graph, stream=side_stream):
+                    x, q = _plane_fit(
+                        z_grid,
+                        grid_center,
+                        max_coord,
+                        batch_size=batch_size,
+                        **constants,
+                    )
+            fit = (graph, z_grid, grid_center, max_coord, x, q)
+        _PLANE_FITS[key] = fit
+
+        graph, z_grid, grid_center, max_coord, x, q = fit
+        z_grid.copy_(world_config.z_grid)
+        grid_center.copy_(world_config.grid_center)
+        max_coord.copy_(world_config.max_coord)
+        graph.replay()
+        return x.clone(), q.clone()
 
 
 def seat_on_terrain(engine, x, q, world_config):
@@ -513,7 +628,9 @@ def seat_on_terrain(engine, x, q, world_config):
     R_body = quat_to_rotmat(q.detach())  # (B, 3, 3)
     wp_rel = torch.einsum("bij,wpj->bwpi", R_body, engine._wheel_pos_rel)  # (B,W,P,3)
     wc_world = (R_body @ engine._wheel_centers.T).transpose(-1, -2) + x.unsqueeze(1)
-    dh, normals, _ = engine._sample_terrain(wp_rel + wc_world.unsqueeze(2), world_config)
+    dh, normals, _ = engine._sample_terrain(
+        wp_rel + wc_world.unsqueeze(2), world_config
+    )
     gap = -dh / normals[..., 2:3].clamp_min(1e-3)  # vertical gap, (B, W, P, 1)
     G = gap.squeeze(-1).amax(dim=2).sort(dim=1, descending=True).values  # (B, W)
     n = G.shape[1]
