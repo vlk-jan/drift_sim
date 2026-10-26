@@ -179,3 +179,62 @@ def test_no_grad_rollout_between_forward_and_backward_is_harmless():
     loss.backward()
     assert torch.equal(sup.grad, ref)
     assert torch.isfinite(other)
+
+
+def test_no_grad_rollout_skips_the_adjoint_and_matches():
+    """A rollout nothing will backpropagate (no_grad, or no input requiring grad)
+    records no tape and allocates no gradient buffers; its poses equal a taped
+    rollout's."""
+    from simulator import engine_wp
+
+    engine_wp._ROLLOUTS.clear()
+    sim = make_sim(t_horizon=0.05, dt=0.005, engine="warp")
+    sup = (
+        0.02 * torch.randn(2, 32, 32, generator=torch.Generator().manual_seed(0))
+    ).requires_grad_()
+    taped = _rollout(sim, sup)
+    with torch.no_grad():
+        plain = _rollout(sim, sup)
+    assert torch.equal(taped.detach(), plain)
+    assert torch.equal(
+        _rollout(sim, sup.detach()), plain
+    )  # grad mode, nothing requires grad
+    grad_ro, plain_ro = engine_wp._ROLLOUTS.values()
+    assert grad_ro.tape is not None and grad_ro.z.grad is not None
+    assert plain_ro.tape is None and plain_ro.z.grad is None
+    assert not hasattr(plain_ro, "adjoint_graph")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA memory pool")
+def test_a_no_grad_rollout_keeps_the_arrays_its_graph_writes():
+    """Without a tape nothing else references the contact flags: freed, their
+    memory goes to the next CUDA allocation of that size, which every later
+    replay of the graph would overwrite. (Warp's CPU allocator does not hand the
+    block back here, so the check needs CUDA.)"""
+    import gc
+
+    import warp as wp
+
+    from simulator import engine_wp
+
+    engine_wp._ROLLOUTS.clear()
+    sim = make_sim(t_horizon=0.05, dt=0.005, engine="warp", device="cuda")
+    sup = torch.zeros(2, 32, 32, device="cuda")
+    with torch.no_grad():
+        _rollout(sim, sup)
+    gc.collect()
+    (ro,) = engine_wp._ROLLOUTS.values()
+    n = ro.state[0].shape[0] - 1  # steps
+    sentinel = [
+        wp.full(
+            (n, 2, 3, int(engine_wp.NUM_WHEEL_POINTS)),
+            -7,
+            dtype=wp.int32,
+            device=ro.device,
+        )
+        for _ in range(8)
+    ]
+    with torch.no_grad():
+        _rollout(sim, sup)
+    for s in sentinel:
+        assert (s.numpy() == -7).all()

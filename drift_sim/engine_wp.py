@@ -29,6 +29,8 @@ Warp 1.14's generated adjoint code re-reads the flag but does not replay its
 stores; newer versions must preserve that behavior for the skip to stay valid.
 """
 
+import contextlib
+
 import numpy as np
 import torch
 import warp as wp
@@ -564,21 +566,23 @@ def integrate_kernel(
 
 # --- Autograd bridge ---
 class _Rollout:
-    """Persistent buffers and two captured graphs (forward, adjoint) for one shape.
+    """Persistent buffers and captured graphs (forward, and adjoint when needed)
+    for one shape.
 
     The rollout is ~1000 tiny launches per call (4 kernels x steps, and as many
     adjoints); launched one by one they are CPU-launch-bound: ~95 ms wall for
     ~30 ms of GPU work at B*n = 128 x 125 steps. Captured once per shape and
     constants, a call is a copy into these buffers plus one graph launch each
     way. Same kernels in the same order, so the same numbers as launching them
-    one by one.
+    one by one. A no-grad rollout records no tape: the forward graph only and no
+    gradient buffers, half the memory and capture time.
     """
 
-    def __init__(self, B, num_steps, H, W, device, consts):
+    def __init__(self, B, num_steps, H, W, device, consts, with_grad):
         (wheel_centers_wp, wheel_radii_wp, inertia_wp, inertia_inv_wp, cog_wp, mass,
          gc, mc, dt, g, stiffness, damping_lam, slip_ref_ratio, slip_floor_velocity,
          ang_damping, torque_limit, com_transfer) = consts  # fmt: skip
-        z = lambda shape, dtype, grad=True: wp.zeros(  # noqa: E731
+        z = lambda shape, dtype, grad=with_grad: wp.zeros(  # noqa: E731
             shape, dtype=dtype, device=device, requires_grad=grad
         )
         # Inputs, copied in per call.
@@ -603,22 +607,36 @@ class _Rollout:
         contact = z(
             (num_steps, B, int(NUM_WHEELS), int(NUM_WHEEL_POINTS)), wp.int32, False
         )
+        # The graphs read these arrays by address, and a tape-less rollout has
+        # no tape to keep them alive: freed, their memory is reused under the
+        # graph.
+        self.contact, self.consts = contact, consts
         # Incoming output gradients, copied in before the adjoint graph.
-        self.seed = [
-            z((num_steps, B), t, False) for t in (wp.vec3, wp.quat, wp.vec3, wp.vec3)
-        ]
+        if with_grad:
+            self.seed = [
+                z((num_steps, B), t, False)
+                for t in (wp.vec3, wp.quat, wp.vec3, wp.vec3)
+            ]
         self.generation = 0
         self.device = device
 
         ctrl, wz, wn, kf = self.ctrl, self.z, self.n, self.kf
         point_dim = (B, int(NUM_WHEELS), int(NUM_WHEEL_POINTS))
-        self.tape = wp.Tape()
+        self.tape = wp.Tape() if with_grad else None
         with wp.ScopedCapture(device) as cap:
-            for a in (*self.acc, contact):
+            for a in self.acc:
                 a.zero_()
+            # Warp 1.14 records and replays zero_ but not fill_ on CPU. On
+            # CUDA, a zero_ memset of this int32 flag array makes tape-less
+            # forward-graph instantiation fail in wp_cuda_graph_create_exec;
+            # fill_ records a working kernel node.
+            if device.is_cuda:
+                contact.fill_(0)
+            else:
+                contact.zero_()
             for s, i in zip(self.state, self.init):
                 wp.copy(s[0], i)
-            with self.tape:
+            with self.tape if with_grad else contextlib.nullcontext():
                 for step in range(num_steps):
                     wp.launch(depth_sum_kernel, dim=point_dim, inputs=[
                         step, state_x, state_q, wheel_centers_wp, wheel_radii_wp, wz, wn,
@@ -647,15 +665,16 @@ class _Rollout:
                         com_transfer, force_acc, torque_acc, force_cut, torque_cut],
                         device=device)  # fmt: skip
         self.forward_graph = cap.graph
-        with wp.ScopedCapture(device) as cap:
-            # Every adjoint accumulates, so all of them start from zero.
-            for a in (*self.state, *self.acc, ctrl, wz, wn, kf):
-                a.grad.zero_()
-            # Step 0 is the seeded initial state, not an output.
-            for s, sd in zip(self.state, self.seed):
-                wp.copy(s.grad[1:], sd)
-            self.tape.backward()
-        self.adjoint_graph = cap.graph
+        if with_grad:
+            with wp.ScopedCapture(device) as cap:
+                # Every adjoint accumulates, so all of them start from zero.
+                for a in (*self.state, *self.acc, ctrl, wz, wn, kf):
+                    a.grad.zero_()
+                # Step 0 is the seeded initial state, not an output.
+                for s, sd in zip(self.state, self.seed):
+                    wp.copy(s.grad[1:], sd)
+                self.tape.backward()
+            self.adjoint_graph = cap.graph
         # The allocations above zero-filled on warp's stream; torch copies the
         # inputs in on its own (WarpTrajectoryFunc.forward).
         wp.synchronize_device(device)
@@ -681,7 +700,8 @@ def _launch(graph, device):
 
 
 # Rollouts by (shape, constants); a few shapes at most (train, val, a last batch).
-# Each keeps its own grids and gradients: ~0.1 GB at B 128 on a 128 x 128 map.
+# A grad rollout keeps its own grids and gradients: ~0.1 GB at B 128 on a
+# 128 x 128 map; a no-grad rollout has no gradients or adjoint graph.
 _ROLLOUTS: dict = {}
 _MAX_ROLLOUTS = 8
 
@@ -689,7 +709,7 @@ _MAX_ROLLOUTS = 8
 def _get_rollout(B, num_steps, H, W, device, consts, with_grad):
     # Everything a captured graph bakes in: shapes, device, and every scalar kernel
     # argument by value (floats, vec/mat entries); robot arrays by address (their
-    # contents are read at replay, and the tape keeps them alive).
+    # contents are read at replay, and the rollout holds them).
     key = (
         B,
         num_steps,
@@ -708,7 +728,7 @@ def _get_rollout(B, num_steps, H, W, device, consts, with_grad):
     if ro is None:
         if len(_ROLLOUTS) >= _MAX_ROLLOUTS:
             _ROLLOUTS.pop(next(iter(_ROLLOUTS)))  # least recently used
-        ro = _Rollout(B, num_steps, H, W, device, consts)
+        ro = _Rollout(B, num_steps, H, W, device, consts, with_grad)
     _ROLLOUTS[key] = ro
     return ro
 
@@ -890,7 +910,7 @@ class WarpStaticEngine:
         num_steps = control_velocities.shape[0]
         k, lam = contact_spring_constants(self.robot_model, engine_config)
 
-        return WarpTrajectoryFunc.apply(
+        inputs = (
             init_state.x,
             init_state.q,
             init_state.xd,
@@ -899,6 +919,9 @@ class WarpStaticEngine:
             world_config.z_grid,
             world_config.normals.permute(0, 2, 3, 1),  # (B,3,H,W) -> (B,H,W,3)
             world_config.k_friction,
+        )
+        return WarpTrajectoryFunc.apply(
+            *inputs,
             self.wp_wheel_centers,
             self.wp_wheel_radii,
             self.wp_inertia,
@@ -917,8 +940,9 @@ class WarpStaticEngine:
             engine_config.ang_damping,
             engine_config.torque_limit,
             1.0 if engine_config.com_transfer else 0.0,
-            # A rollout that will not be backpropagated (eval, no_grad) gets its own
-            # cached buffers, so it can never overwrite a pending training tape.
-            torch.is_grad_enabled(),
+            # A rollout that will not be backpropagated (eval, no_grad, no input
+            # requiring grad) records no tape and gets its own cached buffers, so
+            # it can never overwrite a pending training tape.
+            torch.is_grad_enabled() and any(t.requires_grad for t in inputs),
             str(self.device),
         )
