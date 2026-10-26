@@ -6,10 +6,12 @@ normal), ~10x cheaper per rollout. Keep the engines formula-for-formula
 identical: tests/test_engine_parity.py checks forward poses and gradients
 between them.
 
-The rollout is four kernel launches per timestep on a wp.Tape, captured once
-per shape into a graph that each call replays (_Rollout), with state in
-step-indexed arrays (`state_x[step]`, ...), and contact points are threads
-(`dim=(B, NUM_WHEELS, NUM_WHEEL_POINTS)`). Warp only unrolls loops with
+The rollout is four kernel launches per timestep, captured once per shape into
+a graph that each call replays, with state in step-indexed arrays
+(`state_x[step]`, ...), and contact points as threads (`dim=(B, NUM_WHEELS,
+NUM_WHEEL_POINTS)`). A rollout that needs gradients records a wp.Tape and
+captures a forward and an adjoint graph; a no-grad rollout records no tape and
+captures the forward graph only. Warp only unrolls loops with
 compile-time `range()` bounds; a dynamic loop that mutates state falls back to
 `materialize_redefinitions`, whose adjoint uses end-of-loop values and silently
 gives wrong gradients (forward still matches). Per-step launches keep every
@@ -22,9 +24,8 @@ nothing and have a zero adjoint, which Warp would still replay and reverse in
 full. So the point kernels gate on a per-point flag: pass 1 marks each point in
 (1) or out of (-1) contact, passes 2 and 3 skip the points out of contact, and
 pass 3 marks the contacts it leaves uncut (2). Each kernel reads the flag
-before writing it, so its adjoint replay skips exactly the points that added
-nothing to its forward. The flags are not differentiated; every forward zeroes
-them.
+before writing it, so its adjoint replay skips only points that added nothing to
+its forward. The flags are not differentiated; every forward zeroes them.
 Warp 1.14's generated adjoint code re-reads the flag but does not replay its
 stores; newer versions must preserve that behavior for the skip to stay valid.
 """
@@ -734,7 +735,7 @@ def _get_rollout(B, num_steps, H, W, device, consts, with_grad):
 
 
 class WarpTrajectoryFunc(torch.autograd.Function):
-    """Roll the trajectory on a captured wp.Tape and hand the adjoint back to torch.
+    """Roll the trajectory on captured Warp graphs and hand the adjoint to torch.
 
     The contact constants are the robot's scalars (contact_spring_constants), not
     inputs: nothing differentiates them. The buffers are shared per shape (_Rollout), so a second rollout of the same shape before
