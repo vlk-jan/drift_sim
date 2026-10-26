@@ -62,18 +62,14 @@ class WorldConfig:
                 dtype=torch.float32, device=self.z_grid.device
             )
 
-        # Heightmap gradients along x/y ("xy" indexing: dim 1 is y, dim 2 is x).
-        z_grid_grad = torch.stack(
-            torch.gradient(
-                self.z_grid, spacing=self.grid_res, dim=(2, 1), edge_order=2
-            ),
-            dim=1,
-        )  # (B, 2, D, D)
-        ones = torch.ones_like(z_grid_grad[:, 0]).unsqueeze(1)
-        self.normals = torch.cat((-z_grid_grad, ones), dim=1)
-        self.normals = self.normals / torch.linalg.norm(
-            self.normals, dim=1, keepdim=True
+        # Heightmap gradients along x/y ("xy" indexing: dim 1 is y, dim 2 is x);
+        # the normal is (-gx, -gy, 1) normalised, in closed form: linalg.norm over
+        # the channel dim is ~20x slower on CPU.
+        gx, gy = torch.gradient(
+            self.z_grid, spacing=self.grid_res, dim=(2, 1), edge_order=2
         )
+        nz = (gx.square() + gy.square() + 1).rsqrt()
+        self.normals = torch.stack((-gx * nz, -gy * nz, nz), dim=1)  # (B, 3, D, D)
 
         if self.side_range == (0.0, 0.0):
             self.side_range = (-self.max_coord[0], self.max_coord[0])
