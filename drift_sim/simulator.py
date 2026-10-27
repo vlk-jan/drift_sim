@@ -37,13 +37,15 @@ def _build_world_config(sim, properties: dict) -> WorldConfig:
             "stiffness is the robot's contact_stiffness, not a terrain property: "
             "override the robot model instead"
         )
+    # The maps may come from another device (analysis scripts build them on the
+    # CPU); every terrain query runs on the sim's.
     return WorldConfig(
-        z_grid=properties["support"],
+        z_grid=properties["support"].to(sim.device),
         grid_res=sim.res,
         max_coord=sim.max_coord,
         side_range=sim.side_range,
         fwd_range=sim.fwd_range,
-        k_friction=properties["friction"],
+        k_friction=properties["friction"].to(sim.device),
     )
 
 
@@ -269,7 +271,10 @@ class Simulator(torch.nn.Module):
 
         state.x = self.seat_on_terrain(state.x, state.q, world_config)
 
-        vel_ctrl, vel_ts = self._prepare_inputs(vel_ctrl, vel_ts, T_horizon=T_horizon)
+        # Controls follow the maps onto the sim's device (see _build_world_config).
+        vel_ctrl, vel_ts = self._prepare_inputs(
+            vel_ctrl.to(self.device), vel_ts.to(self.device), T_horizon=T_horizon
+        )
 
         dt = self.engine.config.dt
         num_steps = vel_ts.shape[-1] - 1

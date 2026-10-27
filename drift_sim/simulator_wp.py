@@ -138,7 +138,9 @@ class Simulator(torch.nn.Module):
         # silently zero the gradient of every element but the first.
         B, S = vel_ts.shape
         # float64 is mandatory: float32 spacing at ~1.76e9 s is ~128 s.
-        vel_ts = vel_ts.to(torch.float64).contiguous()
+        # Controls follow the maps onto the sim's device (see _build_world_config).
+        vel_ts = vel_ts.to(self.device, torch.float64).contiguous()
+        vel_ctrl = vel_ctrl.to(self.device)
         step_offsets = (
             torch.arange(num_steps, device=vel_ts.device, dtype=torch.float64) * sim_dt
         )
