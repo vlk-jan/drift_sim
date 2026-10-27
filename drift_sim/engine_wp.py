@@ -624,6 +624,12 @@ class _Rollout:
         ctrl, wz, wn, kf = self.ctrl, self.z, self.n, self.kf
         point_dim = (B, int(NUM_WHEELS), int(NUM_WHEEL_POINTS))
         self.tape = wp.Tape() if with_grad else None
+        if device.is_cuda:
+            # A CPU launch leaves this module at block_dim 1, so the force-load
+            # before capture (drivers older than CUDA 12.3) would load the wrong
+            # variant and the first launch would load inside the capture, which
+            # those drivers refuse. 256 is wp.launch's default.
+            wp.load_module(device=device, block_dim=256)
         with wp.ScopedCapture(device) as cap:
             for a in self.acc:
                 a.zero_()
