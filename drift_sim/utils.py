@@ -626,11 +626,8 @@ def seat_on_terrain(engine, x, q, world_config):
     (`x` may be a view into GT data).
     """
     R_body = quat_to_rotmat(q.detach())  # (B, 3, 3)
-    wp_rel = torch.einsum("bij,wpj->bwpi", R_body, engine._wheel_pos_rel)  # (B,W,P,3)
-    wc_world = (R_body @ engine._wheel_centers.T).transpose(-1, -2) + x.unsqueeze(1)
-    dh, normals, _ = engine._sample_terrain(
-        wp_rel + wc_world.unsqueeze(2), world_config
-    )
+    _, wheel_points = engine._wheel_points(R_body, x)
+    dh, normals, _ = engine._sample_terrain(wheel_points, world_config)
     gap = -dh / normals[..., 2:3].clamp_min(1e-3)  # vertical gap, (B, W, P, 1)
     G = gap.squeeze(-1).amax(dim=2).sort(dim=1, descending=True).values  # (B, W)
     n = G.shape[1]
@@ -656,11 +653,7 @@ def compute_wheel_contacts(engine, traj_se3, world_config, chunk_size=64):
         end = min(start + chunk_size, T)
         n = end - start
         Rc, xc = R[start:end], x[start:end]
-        wp_rel = torch.einsum("tij,wpj->twpi", Rc, engine._wheel_pos_rel)
-        wc_world = torch.einsum(
-            "tij,wj->twi", Rc, engine._wheel_centers
-        ) + xc.unsqueeze(1)
-        wp_world = wp_rel + wc_world.unsqueeze(2)  # (n, W, P, 3)
+        _, wp_world = engine._wheel_points(Rc, xc)  # (n, W, P, 3)
         wc = WorldConfig(
             z_grid=world_config.z_grid.expand(n, -1, -1),
             grid_res=world_config.grid_res,

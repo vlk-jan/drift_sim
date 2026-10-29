@@ -92,6 +92,13 @@ class DPhysicsEngine(torch.nn.Module):
         # (n_wheels, n_points, 3)
         return torch.stack([x, y, z], dim=-1)
 
+    def _wheel_points(self, R, x):
+        centers_world = (R @ self._wheel_centers.T).transpose(-1, -2) + x.unsqueeze(1)
+        return centers_world, (
+            torch.einsum("bij,wpj->bwpi", R, self._wheel_pos_rel)
+            + centers_world.unsqueeze(2)
+        )
+
     def _sample_terrain(
         self,
         wheel_points: torch.Tensor,
@@ -225,14 +232,7 @@ class DPhysicsEngine(torch.nn.Module):
         R = quat_to_rotmat(state.q)
         R_T = R.transpose(-1, -2)
 
-        wheel_centers = self._wheel_centers
-        wheel_centers_world = (R @ wheel_centers.T).transpose(
-            -1, -2
-        ) + state.x.unsqueeze(1)
-
-        # (B, 3, 3) x (W, P, 3) -> (B, W, P, 3)
-        rotated_wheel_pos_rel = torch.einsum("bij,wpj->bwpi", R, self._wheel_pos_rel)
-        wheel_points = rotated_wheel_pos_rel + wheel_centers_world.unsqueeze(2)
+        wheel_centers_world, wheel_points = self._wheel_points(R, state.x)
 
         dh_points, normals, fric_coeffs = self._sample_terrain(
             wheel_points, world_config
@@ -295,6 +295,10 @@ class DPhysicsEngine(torch.nn.Module):
         v_mag = torch.norm(v_slip, dim=-1, keepdim=True)
         v_dir = _SlipDirection.apply(v_slip, v_mag)
 
+        # Penetration-depth shares (sum to 1; zero for a point at zero depth).
+        depth = (-dh_points).clamp_min(0)
+        share = depth / depth.sum(dim=(1, 2), keepdim=True).clamp_min(1e-12)
+
         # F = mu * F_N * tanh(s / slip_ref_ratio) with the slip ratio
         # s = |v_t| / max(|omega_w| r_w, slip_floor_velocity): mu is the peak
         # traction coefficient; a stopped wheel falls back to the velocity form.
@@ -312,9 +316,6 @@ class DPhysicsEngine(torch.nn.Module):
         inv_m_eff = 1.0 / self._mass + (
             u * torch.einsum("bij,bwpj->bwpi", I_world_inv, u)
         ).sum(dim=-1, keepdim=True)
-        # Penetration-depth shares (sum to 1; zero for a point at zero depth).
-        depth = (-dh_points).clamp_min(0)
-        share = depth / depth.sum(dim=(1, 2), keepdim=True).clamp_min(1e-12)
         F_lim = share * torch.norm(
             v_tangential / inv_m_eff / self.config.dt + self._mass * g_t,
             dim=-1,
