@@ -22,6 +22,7 @@ from simulator.utils import (
     HELHEST_CHASSIS,
     HELHEST_CHASSIS_CENTER,
     WHEEL_VISUAL_WIDTH,
+    add_helhest_visual_body,
     add_helhest_visual_wheels,
     chassis_local,
     chassis_positions,
@@ -37,14 +38,14 @@ def box_span():
     return cx - HELHEST_CHASSIS["hx"], cx + HELHEST_CHASSIS["hx"]
 
 
-class FakeScene:
-    """Captures what would be handed to SimView."""
+def wheel_bodies(robot):
+    """The wheels add_helhest_visual_wheels puts into a real SimView scene."""
+    from simview import SimulationScene
 
-    def __init__(self):
-        self.bodies = []
-
-    def add_body_object(self, body):
-        self.bodies.append(body)
+    scene = SimulationScene(batch_size=1, scalar_names=[], dt=0.01)
+    add_helhest_visual_body(scene, "box")
+    add_helhest_visual_wheels(scene, "box", robot=robot)
+    return [b for name, b in scene.model.bodies.items() if name != "box"]
 
 
 # --- the box covers the machine and nothing more ---
@@ -82,20 +83,18 @@ def test_the_box_sits_within_the_wheels_vertically():
 
 
 def test_drawn_hubs_undo_the_chassis_offset():
-    scene = FakeScene()
-    add_helhest_visual_wheels(scene, "box", robot="helhest_v2")
+    bodies = wheel_bodies("helhest_v2")
     model = robot_model_config("helhest_v2")
-    assert len(scene.bodies) == 3
-    for body, want in zip(scene.bodies, model.wheel_centers.tolist()):
+    assert len(bodies) == 3
+    for body, want in zip(bodies, model.wheel_centers.tolist()):
         hub = np.array(body.local_transform[:3]) + np.array(HELHEST_CHASSIS_CENTER)
         np.testing.assert_allclose(hub, want, atol=1e-9)
 
 
 def test_drawn_wheels_use_the_radius_of_the_robot_asked_for():
-    scene = FakeScene()
-    add_helhest_visual_wheels(scene, "box", robot="helhest_v2")
+    bodies = wheel_bodies("helhest_v2")
     want = robot_model_config("helhest_v2").wheel_radii[0].item()
-    for body in scene.bodies:
+    for body in bodies:
         assert body.shape["radius"] == pytest.approx(want)
 
 

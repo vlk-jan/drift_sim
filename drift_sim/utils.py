@@ -921,7 +921,7 @@ def add_helhest_visual_wheels(scene, parent: str, robot: str) -> None:
     relative to the drawn chassis body, which sits HELHEST_CHASSIS_CENTER
     behind base_link.
     """
-    from simview import BodyShapeType, SimViewBody
+    from simview import BodyShapeType
 
     model = robot_model_config(robot)
     centers = model.wheel_centers.tolist()
@@ -933,15 +933,13 @@ def add_helhest_visual_wheels(scene, parent: str, robot: str) -> None:
         sign = 1.0 if pos[1] < 0 else -1.0
         rot = [0.7071068, sign * 0.7071068, 0.0, 0.0]
         hub = [p - o for p, o in zip(pos, HELHEST_CHASSIS_CENTER)]
-        scene.add_body_object(
-            SimViewBody.create(
-                name=name_i,
-                body_type=BodyShapeType.CYLINDER,
-                radius=float(radius),
-                height=WHEEL_VISUAL_WIDTH,
-                parent=parent,
-                local_transform=hub + rot,
-            )
+        scene.create_body(
+            body_name=name_i,
+            shape_type=BodyShapeType.CYLINDER,
+            radius=float(radius),
+            height=WHEEL_VISUAL_WIDTH,
+            parent=parent,
+            local_transform=hub + rot,
         )
 
 
