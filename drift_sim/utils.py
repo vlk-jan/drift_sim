@@ -675,7 +675,6 @@ def generate_controls(
     seed=42,
     wheel_radius=None,
     current_vel_linear=1.0,
-    clamp=None,
 ):
     """Generate random-walk angular wheel velocities.
 
@@ -696,17 +695,13 @@ def generate_controls(
     current_vel = current_vel.unsqueeze(0).expand(num_robots, -1).clone()
 
     for i in range(steps):
-        ts = i * dt
         noise = (
             torch.randn(num_robots, 3, device=device) * 0.05 * (1.0 / wheel_radius)
         )  # linear noise scaled to angular
         current_vel += noise * dt
 
-        if clamp is not None:
-            current_vel = torch.clamp(current_vel, -clamp, clamp)
-
         controls.append(current_vel.clone())
-        timestamps.append(ts)
+        timestamps.append(i * dt)
 
     return torch.stack(controls).permute(1, 0, 2), torch.tensor(
         timestamps, device=device
@@ -715,10 +710,8 @@ def generate_controls(
 
 def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
     """Generate a scripted sequence of dynamic maneuvers."""
-    import numpy as np
-
-    torch.manual_seed(seed)
     steps = int(duration / dt)
+    torch.manual_seed(seed)
     controls = []
     timestamps = []
 
@@ -729,8 +722,6 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
     for i in range(steps):
         ts = i * dt
         progress = ts / duration
-
-        target_vel = torch.zeros(3, device=device, dtype=torch.float32)
 
         if progress < 0.05:
             # 0-5%: warmup (linear acceleration).
@@ -747,7 +738,7 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
             # 15-30%: slalom.
             local_p = (progress - 0.15) / 0.15
             w_base = max_omega * 0.7
-            w_diff = (max_omega * 0.6) * np.sin(local_p * 3 * 2 * np.pi)
+            w_diff = (max_omega * 0.6) * math.sin(local_p * 3 * 2 * math.pi)
             target_vel = torch.tensor(
                 [w_base - w_diff, w_base + w_diff, w_base],
                 device=device,
@@ -783,7 +774,7 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
             # 60-75%: reverse maneuvering.
             local_p = (progress - 0.60) / 0.15
             w_base = -max_omega * 0.6
-            w_diff = (max_omega * 0.3) * np.sin(local_p * 2 * 2 * np.pi)
+            w_diff = (max_omega * 0.3) * math.sin(local_p * 2 * 2 * math.pi)
             target_vel = torch.tensor(
                 [w_base + w_diff, w_base - w_diff, w_base],
                 device=device,
@@ -806,8 +797,8 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
         elif progress < 0.95:
             # 85-95%: agility (rapid changes).
             t_val = ts * 10.0
-            n1 = np.sin(t_val)
-            n2 = np.cos(t_val * 1.3)
+            n1 = math.sin(t_val)
+            n2 = math.cos(t_val * 1.3)
             w_base = max_omega * 0.8
             w_l = w_base * (0.5 + 0.5 * n1)
             w_r = w_base * (0.5 + 0.5 * n2)
