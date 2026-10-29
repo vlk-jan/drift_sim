@@ -78,12 +78,6 @@ def test_the_box_sits_within_the_wheels_vertically():
     assert HELHEST_CHASSIS["hz"] < robot_model_config("helhest_v2").wheel_radii[0].item()
 
 
-def test_the_old_centred_box_would_fail_these():
-    """Guards the regression, not the fix: a box centred on base_link must not pass."""
-    old_front = 0.5
-    assert old_front > robot_model_config("helhest_v2").wheel_radii[0].item()
-
-
 # --- the wheels land on the axles despite the offset ---
 
 

@@ -8,22 +8,19 @@ the gradient norm is 7e10 here (torch); capped, 1e4.
 """
 import pytest
 import torch
+from _helpers import make_sim
 
-DT, N, RES, MC = 2e-3, 128, 0.1, 6.35
+DT, N, MC = 2e-3, 128, 6.35
 PRESS_M = 0.03
+NOISE_M = 0.10
 
 
-def _support_grad(engine, robot, steps, noise):
+def _support_grad(engine, steps):
     torch.manual_seed(0)
     gen = torch.Generator().manual_seed(0)
-    support = (noise * torch.randn(1, N, N, generator=gen)).requires_grad_(True)
+    support = (NOISE_M * torch.randn(1, N, N, generator=gen)).requires_grad_(True)
     friction = torch.full((1, N, N), 0.6, requires_grad=True)
-    if engine == "warp":
-        from models.simulator_wp import Simulator
-    else:
-        from models.simulator import Simulator
-    sim = Simulator(robot=robot, device="cpu", T_horizon=steps * DT, dt=DT)
-    sim.update_world_config(res=RES, max_coord=MC, side_range=(-MC, MC), fwd_range=(-MC, MC))
+    sim = make_sim(steps * DT, dt=DT, engine=engine, max_coord=MC, eval_mode=False)
     seat = sim.seat_on_terrain
     sim.seat_on_terrain = lambda x, q, wc: seat(x, q, wc) - torch.tensor([0.0, 0.0, PRESS_M])
     ctrl = torch.full((1, 200, 3), 3.0)
@@ -36,9 +33,8 @@ def _support_grad(engine, robot, steps, noise):
 
 
 @pytest.mark.parametrize("engine", ["torch", "warp"])
-@pytest.mark.parametrize("robot,noise_m", [("helhest_v2", 0.10)])
-def test_contact_damping_gradient_is_bounded(engine, robot, noise_m):
-    grad = _support_grad(engine, robot, 1000, noise_m)
-    assert torch.isfinite(grad).all(), f"{engine} {robot}: non-finite gradient"
+def test_contact_damping_gradient_is_bounded(engine):
+    grad = _support_grad(engine, 1000)
+    assert torch.isfinite(grad).all(), f"{engine}: non-finite gradient"
     norm = grad.norm()
-    assert norm < 1e6, f"{engine} {robot} {noise_m:.2f} m: gnorm={norm:.3e}"
+    assert norm < 1e6, f"{engine} {NOISE_M:.2f} m: gnorm={norm:.3e}"

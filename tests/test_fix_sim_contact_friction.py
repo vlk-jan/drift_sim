@@ -4,8 +4,8 @@ import math
 
 import pytest
 import torch
+from _helpers import make_sim
 
-from models.simulator import Simulator
 from simulator.engine import DPhysicsEngine
 from simulator.utils import (
     PhysicsEngineConfig,
@@ -20,10 +20,7 @@ MC = (N - 1) * RES / 2
 
 
 def _rollout(T, mu, slope_deg=0.0, omega=0.0):
-    sim = Simulator(robot="helhest_v2", device="cpu", T_horizon=T)
-    sim.update_world_config(
-        res=RES, max_coord=MC, side_range=(-MC, MC), fwd_range=(-MC, MC)
-    )
+    sim = make_sim(T, dt=2e-3, max_coord=MC, eval_mode=False)
     z = math.tan(math.radians(slope_deg)) * torch.linspace(-MC, MC, N)
     props = {
         "support": z.view(1, 1, -1).expand(1, N, N).clone(),
@@ -89,10 +86,7 @@ def test_braked_robot_settles(ramp, turn):
     0.1-0.2, where the uncapped law is ~3x too stiff for explicit Euler: the
     velocity flips sign every step (late std 8e-3 m/s, ~1.8 mm / 0.5 s).
     """
-    sim = Simulator(robot="helhest_v2", device="cpu", T_horizon=2.0)
-    sim.update_world_config(
-        res=RES, max_coord=MC, side_range=(-MC, MC), fwd_range=(-MC, MC)
-    )
+    sim = make_sim(2.0, dt=2e-3, max_coord=MC, eval_mode=False)
     w = [3.0 + turn, 3.0 - turn, 3.0]
     ctrl = torch.tensor([[w, w, [0.0] * 3, [0.0] * 3]])
     ts = torch.tensor([[0.0, 0.5, 0.5 + ramp, 2.0]], dtype=torch.float64)
@@ -152,10 +146,7 @@ def test_step_count_covers_horizon():
 
 def test_initial_state_rejects_unused_keys():
     """Wheel speeds are the controls: an initial "wheel_omega" would be ignored."""
-    sim = Simulator(robot="helhest_v2", device="cpu", T_horizon=0.1)
-    sim.update_world_config(
-        res=RES, max_coord=MC, side_range=(-MC, MC), fwd_range=(-MC, MC)
-    )
+    sim = make_sim(0.1, dt=2e-3, max_coord=MC, eval_mode=False)
     props = {"support": torch.zeros(1, N, N), "friction": torch.full((1, N, N), 0.8)}
     with pytest.raises(ValueError, match="wheel_omega"):
         sim.predict_trajectory(
@@ -169,10 +160,7 @@ def test_initial_state_rejects_unused_keys():
 def test_float32_epoch_stamps_are_promoted():
     """float32 Unix stamps (~128 s spacing) must not collapse the window: the
     wrapper casts to float64 before building the timeline, like the warp one."""
-    sim = Simulator(robot="helhest_v2", device="cpu", T_horizon=0.2)
-    sim.update_world_config(
-        res=RES, max_coord=MC, side_range=(-MC, MC), fwd_range=(-MC, MC)
-    )
+    sim = make_sim(0.2, dt=2e-3, max_coord=MC, eval_mode=False)
     props = {"support": torch.zeros(1, N, N), "friction": torch.full((1, N, N), 0.8)}
     # Exactly representable in float32, so both dtypes carry the same stamps.
     t0 = 1_757_690_112.0

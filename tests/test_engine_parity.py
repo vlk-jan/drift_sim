@@ -9,11 +9,12 @@ statically. Stiffness is the robot's constant in both engines, not an input.
 
 import pytest
 import torch
+from _helpers import cos as _cos
 from _helpers import make_sim as _make_sim_factory
+from _helpers import ratio as _ratio
 
 # Warp has a CPU device too: the suite runs on CUDA when present, else on CPU.
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-ROBOTS = ("helhest_v2",)
 GRID_N = 128
 RES = 0.1
 MAX_COORD = GRID_N * RES / 2 - RES / 2  # outermost cell centre, as world_cfg_from_config: 6.35
@@ -48,10 +49,10 @@ SAME_RUN_ATOL = 1e-4
 FD_REL_TOL = {"flat": 0.02, "rough": 0.06}
 
 
-def _make_sim(engine, t_horizon, batch_size=1, dt=DT, robot="helhest_v2"):
+def _make_sim(engine, t_horizon, dt=DT):
     return _make_sim_factory(
         t_horizon, dt, engine=engine, device=DEVICE, max_coord=MAX_COORD,
-        eval_mode=False, robot=robot,
+        eval_mode=False,
     )
 
 
@@ -93,14 +94,13 @@ def _rollout(
     distinct_batch=False,
     dt=DT,
     flat=False,
-    robot="helhest_v2",
 ):
     """Run one rollout and backprop a trajectory loss.
 
     Returns (final_pos_per_batch, grad_support, grad_friction).
     """
     t_horizon = n_steps * dt
-    sim = _make_sim(engine, t_horizon, batch_size, dt, robot)
+    sim = _make_sim(engine, t_horizon, dt)
     support, friction, ctrl, ctrl_ts = _make_inputs(
         t_horizon, batch_size, distinct_batch=distinct_batch, dt=dt
     )
@@ -119,23 +119,14 @@ def _rollout(
     )
 
 
-def _cos(a, b):
-    return torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0).item()
-
-
-def _ratio(a, b):
-    return (a.norm() / b.norm().clamp_min(1e-30)).item()
-
-
 # --- Forward parity ---
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
 @pytest.mark.parametrize("dt", DTS)
 @pytest.mark.parametrize("n_steps", [50, 250, 1000])
-def test_forward_pose_matches_torch(n_steps, dt, robot):
-    pos_t, _, _ = _rollout("torch", n_steps, dt=dt, robot=robot)
-    pos_w, _, _ = _rollout("warp", n_steps, dt=dt, robot=robot)
+def test_forward_pose_matches_torch(n_steps, dt):
+    pos_t, _, _ = _rollout("torch", n_steps, dt=dt)
+    pos_w, _, _ = _rollout("warp", n_steps, dt=dt)
     err = (pos_w - pos_t).norm().item()
     assert err < POS_ATOL, (
         f"warp/torch final pose diverged by {err:.3e} m over {n_steps} steps "
@@ -148,12 +139,11 @@ def test_forward_pose_matches_torch(n_steps, dt, robot):
 
 # A dynamic-loop adjoint breaks at 100 steps and goes NaN at 1000, the training
 # length; both must stay covered.
-@pytest.mark.parametrize("robot", ROBOTS)
 @pytest.mark.parametrize("dt", DTS)
 @pytest.mark.parametrize("n_steps", [50, 100, 250, 1000])
-def test_gradients_match_torch(n_steps, dt, robot):
-    _, gs_t, gf_t = _rollout("torch", n_steps, dt=dt, robot=robot)
-    _, gs_w, gf_w = _rollout("warp", n_steps, dt=dt, robot=robot)
+def test_gradients_match_torch(n_steps, dt):
+    _, gs_t, gf_t = _rollout("torch", n_steps, dt=dt)
+    _, gs_w, gf_w = _rollout("warp", n_steps, dt=dt)
 
     assert torch.isfinite(gs_w).all(), (
         f"warp support grad is non-finite at {n_steps} steps, dt={dt:g}"
@@ -175,10 +165,10 @@ def test_gradients_match_torch(n_steps, dt, robot):
         )
 
 
-def _brake_rollout(engine, robot):
+def _brake_rollout(engine):
     """Drive 0.5 s at 3 rad/s with a slight turn, brake to 0 by 0.55 s, hold."""
     t_horizon = 1.5
-    sim = _make_sim(engine, t_horizon, dt=DT_TRAIN, robot=robot)
+    sim = _make_sim(engine, t_horizon, dt=DT_TRAIN)
     support = torch.zeros(1, GRID_N, GRID_N, device=DEVICE, requires_grad=True)
     friction = torch.full((1, GRID_N, GRID_N), 0.8, device=DEVICE, requires_grad=True)
     ctrl = torch.tensor([[[3.5, 2.5, 3.0]] * 2 + [[0.0] * 3] * 2], device=DEVICE)
@@ -193,12 +183,11 @@ def _brake_rollout(engine, robot):
     return traj[0, -1, :3, 3].detach(), late, support.grad, friction.grad
 
 
-@pytest.mark.parametrize("robot", ROBOTS)
-def test_brake_to_stop_settles_and_matches_torch(robot):
+def test_brake_to_stop_settles_and_matches_torch():
     """A braked robot must come to rest in both engines (the friction cut in
     simulator/engine.py::_friction), with matching pose and gradients."""
-    pos_t, late_t, gs_t, gf_t = _brake_rollout("torch", robot)
-    pos_w, late_w, gs_w, gf_w = _brake_rollout("warp", robot)
+    pos_t, late_t, gs_t, gf_t = _brake_rollout("torch")
+    pos_w, late_w, gs_w, gf_w = _brake_rollout("warp")
     assert late_t < 1e-4 and late_w < 1e-4, (late_t, late_w)
     assert (pos_w - pos_t).norm().item() < POS_ATOL, (pos_t.tolist(), pos_w.tolist())
     for name, gw, gt in (("support", gs_w, gs_t), ("friction", gf_w, gf_t)):
@@ -218,13 +207,13 @@ def test_batch_elements_are_independent(engine):
     t_horizon = n_steps * DT
     support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon, B, distinct_batch=True)
 
-    sim = _make_sim(engine, t_horizon, B)
+    sim = _make_sim(engine, t_horizon)
     traj, _, _, _ = sim.predict_trajectory(
         {"support": support, "friction": friction}, ctrl, ctrl_ts
     )
     batched = traj[:, -1, :3, 3].detach().clone()
 
-    sim1 = _make_sim(engine, t_horizon, 1)
+    sim1 = _make_sim(engine, t_horizon)
     for b in range(B):
         traj_b, _, _, _ = sim1.predict_trajectory(
             {
@@ -384,7 +373,7 @@ def test_rest_start_gradients_match_torch():
     props = {"support": support.detach(), "friction": friction.detach()}
     grads = {}
     for engine in ("torch", "warp"):
-        sim = _make_sim(engine, t_horizon, dt=DT_TRAIN, robot="helhest_v2")
+        sim = _make_sim(engine, t_horizon, dt=DT_TRAIN)
         sim.seat_on_terrain = lambda x, q, wc: x  # keep the sag
         rm = sim.robot_model
         z_rest = float(rm.wheel_radii[0]) - rm.mass * 9.81 / rm.contact_stiffness
@@ -448,7 +437,7 @@ def _rough_support():
     return (0.03 * z / z.abs().max()).to(DEVICE)
 
 
-def _fd_rel_errors(engine, robot, terrain, eps=5e-4):
+def _fd_rel_errors(engine, terrain, eps=5e-4):
     """Relative error |fd - analytic| / max(|fd|, |analytic|) of the support
     gradient at the 4 cells of largest |gradient| (wheel contacts sit off the
     grid centre).
@@ -462,7 +451,7 @@ def _fd_rel_errors(engine, robot, terrain, eps=5e-4):
 
     n_steps = 250
     t_horizon = n_steps * DT
-    sim = _make_sim(engine, t_horizon, robot=robot)
+    sim = _make_sim(engine, t_horizon)
     support, friction, ctrl, ctrl_ts = _make_inputs(t_horizon)
     if terrain == "rough":
         support = _rough_support().requires_grad_(True)
@@ -505,9 +494,8 @@ def _fd_rel_errors(engine, robot, terrain, eps=5e-4):
 
 
 @pytest.mark.parametrize("terrain", ["flat", "rough"])
-@pytest.mark.parametrize("robot", ROBOTS)
 @pytest.mark.parametrize("engine", ["torch", "warp"])
-def test_gradient_matches_finite_differences(engine, robot, terrain):
+def test_gradient_matches_finite_differences(engine, terrain):
     """Each engine's support gradient must match central finite differences.
 
     Catches both engines agreeing on the same mistake; torch is the parity
@@ -515,9 +503,9 @@ def test_gradient_matches_finite_differences(engine, robot, terrain):
     touchdown makes the analytic gradient run 5-35 % low (rel errors up to 0.36
     here); see FD_REL_TOL for the measured errors.
     """
-    rels = _fd_rel_errors(engine, robot, terrain)
+    rels = _fd_rel_errors(engine, terrain)
     assert rels, "no cell carried gradient — the test verified nothing"
-    assert max(rels) < FD_REL_TOL[terrain], f"{engine} {robot} {terrain}: rel errors {rels}"
+    assert max(rels) < FD_REL_TOL[terrain], f"{engine} {terrain}: rel errors {rels}"
 
 
 def _off_map_rollout(engine):
@@ -526,7 +514,7 @@ def _off_map_rollout(engine):
     n, t_horizon = 32, 3.0
     mc = (n - 1) * RES / 2
     sim = _make_sim_factory(t_horizon, DT_TRAIN, engine=engine, device=DEVICE,
-                            max_coord=mc, eval_mode=False, robot="helhest_v2")
+                            max_coord=mc, eval_mode=False)
     g = torch.Generator().manual_seed(3)
     support = (0.03 * torch.randn(1, n, n, generator=g)).to(DEVICE).requires_grad_(True)
     friction = torch.full((1, n, n), 0.7, device=DEVICE)
@@ -574,7 +562,7 @@ def test_gradients_match_torch_on_a_friction_ramp():
     grads = []
     for engine in ("torch", "warp"):
         support, _, ctrl, ctrl_ts = _make_inputs(t_horizon, dt=DT_TRAIN)
-        sim = _make_sim(engine, t_horizon, dt=DT_TRAIN, robot="helhest_v2")
+        sim = _make_sim(engine, t_horizon, dt=DT_TRAIN)
         traj, _, _, _ = sim.predict_trajectory(
             {"support": support, "friction": mu.clone()}, ctrl, ctrl_ts
         )
