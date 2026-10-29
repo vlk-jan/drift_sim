@@ -943,3 +943,23 @@ def add_helhest_visual_wheels(scene, parent: str, robot: str) -> None:
                 local_transform=hub + rot,
             )
         )
+
+
+def apply_slip_constants(sim, consts):
+    """Set the traction-law constants on every engine config `sim` carries; fail loud.
+
+    k_friction * F_N * tanh(s / slip_ref_ratio), s = |v_t| / max(|omega_w| r_w,
+    slip_floor_velocity): must match training. Covers the torch wrapper's
+    engine.config and the warp wrapper's engine_config.
+    """
+    for key, val in consts.items():
+        applied = []
+        for _cfg in (
+            getattr(sim, "engine_config", None),
+            getattr(getattr(sim, "engine", None), "config", None),
+        ):
+            if _cfg is not None:
+                setattr(_cfg, key, float(val))
+                applied.append(getattr(_cfg, key))
+        if not applied or any(a != float(val) for a in applied):
+            raise RuntimeError(f"{key} {val} did not reach the engine config (applied={applied})")
