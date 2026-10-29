@@ -759,37 +759,14 @@ class WarpTrajectoryFunc(torch.autograd.Function):
         z_grid_t,  # (B, H, W)
         normals_grid_t,  # (B, H, W, 3)
         friction_grid_t,  # (B, H, W)
-        wheel_centers_wp,
-        wheel_radii_wp,
-        inertia_wp,
-        inertia_inv_wp,
-        cog_wp,
-        mass,
-        grid_center_t,
-        max_coord_t,
-        dt,
-        num_steps,
-        g,
-        stiffness,
-        damping_lam,
-        slip_ref_ratio,
-        slip_floor_velocity,
-        ang_damping,
-        torque_limit,
-        com_transfer,
+        consts,
         with_grad,
         device_str,
     ):
         device = wp.get_device(device_str)
         B = init_x.shape[0]
         H, W = z_grid_t.shape[1:]
-        consts = (
-            wheel_centers_wp, wheel_radii_wp, inertia_wp, inertia_inv_wp, cog_wp, mass,
-            wp.vec2(float(grid_center_t[0]), float(grid_center_t[1])),
-            wp.vec2(float(max_coord_t[0]), float(max_coord_t[1])),
-            dt, g, stiffness, damping_lam, slip_ref_ratio, slip_floor_velocity, ang_damping,
-            torque_limit, com_transfer,
-        )  # fmt: skip
+        num_steps = control_velocities.shape[0]
         ro = _get_rollout(B, num_steps, H, W, device, consts, with_grad)
 
         def put(arr, t):
@@ -861,24 +838,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
             get_grad(ro.z, need[5]),
             get_grad(ro.n, need[6]),
             get_grad(ro.kf, need[7]),
-            None,  # wheel_centers_wp
-            None,  # wheel_radii_wp
-            None,  # inertia_wp
-            None,  # inertia_inv_wp
-            None,  # cog_wp
-            None,  # mass
-            None,  # grid_center_t
-            None,  # max_coord_t
-            None,  # dt
-            None,  # num_steps
-            None,  # g
-            None,  # stiffness
-            None,  # damping_lam
-            None,  # slip_ref_ratio
-            None,  # slip_floor_velocity
-            None,  # ang_damping
-            None,  # torque_limit
-            None,  # com_transfer
+            None,  # consts
             None,  # with_grad
             None,  # device_str
         )
@@ -914,7 +874,6 @@ class WarpStaticEngine:
         self, init_state, control_velocities, world_config, engine_config
     ):
         """Roll out (num_steps, B, 3) wheel speeds; outputs are (num_steps, B, ...)."""
-        num_steps = control_velocities.shape[0]
         k, lam = contact_spring_constants(self.robot_model, engine_config)
 
         inputs = (
@@ -927,18 +886,16 @@ class WarpStaticEngine:
             world_config.normals.permute(0, 2, 3, 1),  # (B,3,H,W) -> (B,H,W,3)
             world_config.k_friction,
         )
-        return WarpTrajectoryFunc.apply(
-            *inputs,
+        consts = (
             self.wp_wheel_centers,
             self.wp_wheel_radii,
             self.wp_inertia,
             self.wp_inertia_inv,
             self.wp_cog,
             self.mass,
-            world_config.grid_center_xy,  # floats, so no device read
-            world_config.max_coord_xy,
+            wp.vec2(*world_config.grid_center_xy),
+            wp.vec2(*world_config.max_coord_xy),
             engine_config.dt,
-            num_steps,
             engine_config.g,
             k,
             lam,
@@ -947,6 +904,10 @@ class WarpStaticEngine:
             engine_config.ang_damping,
             engine_config.torque_limit,
             1.0 if engine_config.com_transfer else 0.0,
+        )
+        return WarpTrajectoryFunc.apply(
+            *inputs,
+            consts,
             # A rollout that will not be backpropagated (eval, no_grad, no input
             # requiring grad) records no tape and gets its own cached buffers, so
             # it can never overwrite a pending training tape.
