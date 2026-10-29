@@ -57,26 +57,18 @@ def _apply_initial_state_override(state, initial_state, device):
     Unknown keys raise: wheel speeds are the controls, so an initial
     "wheel_omega" would be silently ignored.
     """
-    if initial_state is not None:
-        unused = set(initial_state) - {"x", "q", "xd", "omega"}
-        if unused:
-            raise ValueError(f"initial_state keys not used by the simulator: {unused}")
-        # A plain dataclass does not check on assignment: a (1, 3) start would
-        # silently broadcast over the whole batch.
-        for k, v in initial_state.items():
-            if v.shape[0] != state.x.shape[0]:
-                raise ValueError(
-                    f"initial_state[{k!r}] has batch {v.shape[0]}, "
-                    f"expected {state.x.shape[0]}"
-                )
-        if "x" in initial_state:
-            state.x = initial_state["x"].to(device, torch.float32)
-        if "q" in initial_state:
-            state.q = initial_state["q"].to(device, torch.float32)
-        if "xd" in initial_state:
-            state.xd = initial_state["xd"].to(device, torch.float32)
-        if "omega" in initial_state:
-            state.omega = initial_state["omega"].to(device, torch.float32)
+    unused = set(initial_state or ()) - {"x", "q", "xd", "omega"}
+    if unused:
+        raise ValueError(f"initial_state keys not used by the simulator: {unused}")
+    # A plain dataclass does not check on assignment: a (1, 3) start would
+    # silently broadcast over the whole batch.
+    for k, v in (initial_state or {}).items():
+        if v.shape[0] != state.x.shape[0]:
+            raise ValueError(
+                f"initial_state[{k!r}] has batch {v.shape[0]}, "
+                f"expected {state.x.shape[0]}"
+            )
+        setattr(state, k, v.to(device, torch.float32))
     return state
 
 
@@ -112,6 +104,7 @@ class Simulator(torch.nn.Module):
         self.device = device
 
         self.engine = DPhysicsEngine(engine_config, robot_model)
+        self._geom = self.engine
         self.engine.to(device)
         self.engine.eval()
 
@@ -212,7 +205,7 @@ class Simulator(torch.nn.Module):
         sag. Returns a new position (`x` may be a view into GT data). Shared with
         the warp wrapper via simulator/utils.py.
         """
-        return seat_on_terrain(self.engine, x, q, world_config)
+        return seat_on_terrain(self._geom, x, q, world_config)
 
     def predict_trajectory(
         self,
@@ -275,7 +268,9 @@ class Simulator(torch.nn.Module):
         vel_ctrl, vel_ts = self._prepare_inputs(
             vel_ctrl.to(self.device), vel_ts.to(self.device), T_horizon=T_horizon
         )
+        return self._rollout(state, vel_ctrl, vel_ts, world_config, include_start)
 
+    def _rollout(self, state, vel_ctrl, vel_ts, world_config, include_start):
         dt = self.engine.config.dt
         num_steps = vel_ts.shape[-1] - 1
 
@@ -313,7 +308,7 @@ class Simulator(torch.nn.Module):
         top_part = torch.cat(
             [R_all, t_all.unsqueeze(-1)], dim=-1
         )  # (B, SimSteps, 3, 4)
-        bottom = torch.zeros(actual_bs, R_all.shape[1], 1, 4, device=self.device)
+        bottom = torch.zeros(state.x.shape[0], R_all.shape[1], 1, 4, device=self.device)
         bottom[:, :, 0, 3] = 1.0
         poses = torch.cat([top_part, bottom], dim=2)  # (B, SimSteps, 4, 4)
 
