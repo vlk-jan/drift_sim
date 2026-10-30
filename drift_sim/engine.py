@@ -24,6 +24,13 @@ CONTACT_LAW = "wheel-deepest-point-v2"
 # exact above: near rest the exact ~1 / |v| through the friction cap, which flips
 # branch every step, is one-sided and huge (tests/test_low_slip_gradient.py).
 SLIP_DIR_GRAD_EPS = 2e-2
+# Rolling-speed floor (m/s) of the slip ratio's derivative, exact above. Below it the
+# tanh law's slope mu F_N / (slip_ref_ratio v_roll) outruns explicit Euler (gain
+# ~mu g dt / (slip_ref_ratio v_roll) > 1 per step); the forward is held by the
+# F_lim cap, the adjoint is not and grows ~1e6 over 20 steps of a stopped robot
+# sliding off its seat (tests/test_spike_rollout_regression.py, batch 1019). The
+# bound is ~0.2 at mu 1; the forward is unchanged.
+SLIP_GRAD_FLOOR = 0.3
 
 
 class _SlipDirection(torch.autograd.Function):
@@ -305,7 +312,11 @@ class DPhysicsEngine(torch.nn.Module):
         v_roll = (state.wheel_omega.abs().float() * self._wheel_radii).clamp_min(
             self.config.slip_floor_velocity
         )[:, :, None, None]  # (B, W, 1, 1)
-        slip = v_mag / v_roll
+        # The value is v_mag / v_roll; the derivative is 1 / max(v_roll, SLIP_GRAD_FLOOR).
+        # v_roll follows the commands and carries no gradient.
+        slip = (v_mag / v_roll).detach() + (
+            v_mag - v_mag.detach()
+        ) / v_roll.clamp_min(SLIP_GRAD_FLOOR)
         F_c = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(
             slip / self.config.slip_ref_ratio
         )

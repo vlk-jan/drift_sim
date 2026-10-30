@@ -87,3 +87,37 @@ def test_engines_agree_on_the_spike_row(rollouts):
         out["torch"][1][0], out["warp"][1][0], dim=0
     ).item()
     assert cos > 0.999, f"row 83 torch/warp support gradient cosine {cos:.6f}"
+
+
+# Batch 1019, row 14, segment 2 (v26 recipe, trained heads): zero commands, the
+# robot slides ~17 cm off its seat. With the exact slip-ratio derivative the
+# stopped wheels' tanh law outruns the explicit step and the adjoint grows from
+# step 20: |dL/dsupport| 2604 (torch), 1242 (warp) where finite differences give
+# < 0.02. SLIP_GRAD_FLOOR brings both to ~1e-4. L = sum(upstream . outputs), the
+# training loss's own upstream gradient on this row.
+FIXTURE_B1019 = Path(__file__).parent / "data" / "spike_rollout_b1019.pt"
+
+
+@pytest.mark.parametrize("engine", ["torch", "warp"])
+def test_sliding_off_the_seat_keeps_the_gradient_bounded(engine):
+    d = torch.load(FIXTURE_B1019, weights_only=True)
+    sim = make_sim(
+        d["T_horizon"], 2e-3, engine=engine, device=DEVICE, robot=d["robot"],
+        res=d["world"]["res"], max_coord=d["world"]["max_coord"],
+    )  # fmt: skip
+    sim.update_world_config(**d["world"])
+    support = d["support"].to(DEVICE).requires_grad_(True)
+    traj, _, xd, omega = sim.predict_trajectory(
+        {"support": support, "friction": d["friction"].to(DEVICE)},
+        d["ctrl"].to(DEVICE),
+        d["ctrl_ts"].to(DEVICE),
+        initial_state={k: v.to(DEVICE) for k, v in d["initial_state"].items()},
+        T_horizon=d["T_horizon"],
+        include_start=True,
+    )
+    up = {k: v.to(DEVICE) for k, v in d["upstream"].items()}
+    loss = sum((o * up[k]).sum() for o, k in ((traj, "traj"), (xd, "xd"), (omega, "omega")))
+    loss.backward()
+    norm = support.grad.norm().item()
+    assert torch.isfinite(support.grad).all(), f"{engine}: non-finite support gradient"
+    assert norm < 1e-2, f"{engine}: support gradient {norm:.3g}"
