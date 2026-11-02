@@ -275,7 +275,7 @@ class Simulator(torch.nn.Module):
         num_steps = vel_ts.shape[-1] - 1
 
         # Lists + stack keep the autograd graph (no in-place writes).
-        R_list = []
+        q_list = []
         t_list = []
         xd_out_list = []
         omega_out_list = []
@@ -283,7 +283,7 @@ class Simulator(torch.nn.Module):
 
         ts = vel_ts[:, 0].clone()
         if include_start:
-            R_list.append(quat_to_rotmat(state.q))
+            q_list.append(state.q)
             t_list.append(state.x)
             xd_out_list.append(state.xd)
             omega_out_list.append(state.omega)
@@ -297,13 +297,13 @@ class Simulator(torch.nn.Module):
             # Poses are post-step states, stamped at the step's end.
             ts = ts + dt
 
-            R_list.append(quat_to_rotmat(state.q))  # (B, 3, 3)
+            q_list.append(state.q)  # (B, 4)
             t_list.append(state.x)  # (B, 3)
             xd_out_list.append(state.xd)
             omega_out_list.append(state.omega)
             timestamps_list.append(ts)
 
-        R_all = torch.stack(R_list, dim=1)  # (B, SimSteps, 3, 3)
+        R_all = quat_to_rotmat(torch.stack(q_list, dim=1))  # (B, SimSteps, 3, 3)
         t_all = torch.stack(t_list, dim=1)  # (B, SimSteps, 3)
         top_part = torch.cat(
             [R_all, t_all.unsqueeze(-1)], dim=-1

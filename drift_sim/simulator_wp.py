@@ -23,7 +23,6 @@ class Simulator(TorchSimulator):
         (B, Steps), and each element has its own window.
         """
         super().__init__(robot, device, T_horizon, dt, com_transfer)
-        self._geom = self.engine
         del self.engine
         self.engine = WarpStaticEngine(self.robot_model, self.device)
         self.engine_config = self._geom.config
