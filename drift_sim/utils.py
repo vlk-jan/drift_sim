@@ -172,12 +172,27 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
     MASS 106 kg. COG AND INERTIA ARE NOT THE URDF'S, and their source is not
     recorded: the URDF's links sum to 67.0 kg (exact uniform boxes, a 2 kg
     battery) with the centre of mass 0.171 m behind the front axle and inertia
-    diag ~(3.38, 4.04, 7.17). The cog and inertia here are those of a 93.8 kg
-    model of the lighter Livox rig, the inertia scaled to 106 kg (where the
-    extra mass sits is not measured). Both remain unverified (issue 36 in
-    docs/METHOD.md); inertia enters the transient response the trajectory loss
-    scores. The URDF is stale in other respects too: it declares an Ouster
-    `os_sensor` and four e-CAM cameras this robot does not carry.
+    diag ~(3.38, 4.04, 7.17). The inertia here is that of a 93.8 kg model of
+    the lighter Livox rig, scaled to 106 kg (where the extra mass sits is not
+    measured); it is unverified (issue 36 in docs/METHOD.md) and enters the
+    transient response the trajectory loss scores. The URDF is stale in other
+    respects too: it declares an Ouster `os_sensor` and four e-CAM cameras this
+    robot does not carry.
+
+    COG x -0.21 is FITTED ON TURNS, not weighed. It sets the rear wheel's load
+    (0.21 / 0.697 = 30 %), hence its lateral scrub, hence the yaw response. On
+    198 turning windows of the v2.5 TRAINING scenes (torch, GT-map support,
+    constant mu 0.6) sim/measured yaw gain is 0.69 at the old -0.255 (sim
+    effective half-track 0.92 m vs 0.67 measured, the turn pivot 0.21 m behind
+    the front axle vs 0.08 measured), 0.93 at -0.21 (half-track 0.67, pivot
+    0.09), 1.18 at the URDF's -0.171; end error 12.9 -> 9.3 cm. Uniform mu
+    cannot do this (the law is homogeneous in mu). Scored, not fitted, on 223
+    turning windows of the nine held-out scenes: gain 0.71 -> 0.92, pivot -0.15
+    -> -0.09 (measured -0.11), end error 17.3 -> 13.9 cm, 8 of 9 scenes better;
+    the made-surface probe below also improves (3.49 -> 3.37 cm). A rear-wheel
+    mu x0.75 or a lateral/longitudinal friction ratio 0.7 fit the same windows
+    about as well, so per-wheel weighing should confirm the load split. The
+    terrain ordering is not reproduced (meadow stays under-turned).
 
     THE RADIUS IS NOT. The URDF's 0.36 is helhest-common's `wheel_radius`
     (subtdata:/data/helhest/helhest-jr-workspaces.tar.gz), which predates this
@@ -221,16 +236,18 @@ def helhest_v2_robot_model() -> "RobotModelConfig":
     constant mu, 512 windows of the made-surface TRAINING scenes 0000/0002-0006
     of HELHEST_v2_4, mean xy error over 0.5-2 s; baseline 3.58 cm):
     radius is sharp and 0.334 is the optimum (0.325 +0.5 cm, 0.345 +1.3 cm, 0.36
-    +4.3 cm); cog x -0.255 is the optimum (URDF -0.171 +0.1 cm, +-0.1 m +0.5 to
-    +0.9 cm); inertia x0.75-x2 within 0.1 cm (x0.5 +0.4 cm), so the mass-scaled
-    tensor is not the error's limit; k_stiffness 1e5-4e5 N/m within 0.1 cm (worse
+    +4.3 cm); cog x is flat there (-0.255 best on v2.4 warp, URDF -0.171 +0.1 cm,
+    +-0.1 m +0.5 to +0.9 cm; on v2.5 torch 256 windows -0.21 is 0.12 cm better
+    than -0.255), mostly-straight windows do not identify it -- see COG;
+    inertia x0.75-x2 within 0.1 cm (x0.5 +0.4 cm), so the mass-scaled tensor
+    is not the error's limit; k_stiffness 1e5-4e5 N/m within 0.1 cm (worse
     from 8e5); slip_ref_ratio 0.1-0.2 tie (0.02 +0.2 cm, 0.4 +0.2 cm);
     slip_floor_velocity 0.01-0.2 m/s has no effect. mu 0.8-1.5 within 0.15 cm.
     """
     mass = 106.0
     return RobotModelConfig(
         mass=mass,
-        cog=torch.tensor([-0.255, 0.009, 0.0]),
+        cog=torch.tensor([-0.21, 0.009, 0.0]),
         wheel_radii=torch.tensor([0.334, 0.334, 0.334]),
         wheel_centers=torch.tensor(
             [[0.0, 0.36, 0.0], [0.0, -0.36, 0.0], [-0.697, 0.0, 0.0]]
@@ -319,7 +336,7 @@ class PhysicsEngineConfig:
     # Rolling-speed floor (m/s); a stationary or barely turning wheel uses the
     # velocity form s = |v_t| / 0.05, which keeps the force finite and smooth.
     slip_floor_velocity: float = 0.05
-    # state.x is the body origin (front axle), not the CoM (|r| = 0.255 m on
+    # state.x is the body origin (front axle), not the CoM (|r| = 0.21 m on
     # helhest). On = the correct rigid-body dynamics (alpha x r and
     # omega x (omega x r) terms).
     com_transfer: bool = True

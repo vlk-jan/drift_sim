@@ -64,17 +64,17 @@ def test_pivot_turn_is_not_capped():
     """The dragged rear wheel slides under drive torque; a gravity-only impulse
     cap clips it on 998/1000 steps (-0.654 rad).
 
-    Reference -0.578: the dt -> 0 limit of this rollout at the committed
-    constants (k 2.1e5, damping_alpha 2.0; dt 5e-4 and 2e-4 give -0.5782, dt
-    2e-3 adds -0.0005 of Euler error). At k 1.42e5 with 32 rim points it is
-    -0.590: three points per wheel sit under the 7.3 mm sag, a wider patch that
-    scrubs more; at 4.9 mm sag one point carries the wheel at rest, as at 16
-    points (-0.578, which no cap rule moves). Gating the cap on slip < 2
-    slip_ref_ratio gives -0.598 with omega_z chatter (std 3e-3) at 16 points.
+    Reference -1.385: this rollout (dt 2e-3) at the committed constants (cog x
+    -0.21, k 2.1e5, damping_alpha 2.0); the dt -> 0 limit is -1.380 (dt 5e-4
+    -1.3810, 2e-4 -1.3804). With the rear wheel carrying 30 % of the weight it
+    scrubs less than at cog -0.255 (37 %), where the same rollout gave -0.578.
+    At cog -0.255: k 1.42e5 with 32 rim points gave -0.590 (three points per
+    wheel under the 7.3 mm sag, a wider patch that scrubs more), and gating the
+    cap on slip < 2 slip_ref_ratio -0.598 with omega_z chatter at 16 points.
     """
     _, xd, R = _rollout(2.0, mu=0.8, omega=[0.5 / 0.334, -0.5 / 0.334, 0.0])
     yaw = math.atan2(R[1, 0].item(), R[0, 0].item())
-    assert abs(yaw + 0.578) < 0.003, f"pivot yawed {yaw:.4f} rad, law gives -0.578"
+    assert abs(yaw + 1.385) < 0.003, f"pivot yawed {yaw:.4f} rad, law gives -1.385"
 
 
 @pytest.mark.parametrize("ramp", [0.5, 0.05])
