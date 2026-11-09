@@ -96,11 +96,24 @@ def test_engines_agree_on_the_spike_row(rollouts):
 # < 0.02. SLIP_GRAD_FLOOR brings both to ~1e-4. L = sum(upstream . outputs), the
 # training loss's own upstream gradient on this row.
 FIXTURE_B1019 = Path(__file__).parent / "data" / "spike_rollout_b1019.pt"
+# Row 124 of a max_friction 3.0 replay batch: friction 0.9-2.6, wheels rolling at
+# ~0.45 m/s, so SLIP_GRAD_FLOOR never binds; the mu-scaled floor (SLIP_GRAD_GAIN)
+# brings |dL/dsupport| from ~3.7e3 to ~1e-4 (finite differences ~1e-5..1e-4).
+FIXTURE_MU3 = Path(__file__).parent / "data" / "spike_rollout_mu3.pt"
+# Row 89 of another max_friction 3.0 batch: the slip-direction derivative's 1 / |v|
+# outruns the step once SLIP_GRAD_GAIN has fixed the slip ratio's (|dL/dsupport| ~33,
+# finite differences ~1e-4); the mu-scaled SLIP_DIR_GRAD_EPS fixes it.
+FIXTURE_MU3_DIR = Path(__file__).parent / "data" / "spike_rollout_mu3_dir.pt"
 
 
+@pytest.mark.parametrize(
+    "fixture",
+    [FIXTURE_B1019, FIXTURE_MU3, FIXTURE_MU3_DIR],
+    ids=["b1019", "mu3", "mu3_dir"],
+)
 @pytest.mark.parametrize("engine", ["torch", "warp"])
-def test_sliding_off_the_seat_keeps_the_gradient_bounded(engine):
-    d = torch.load(FIXTURE_B1019, weights_only=True)
+def test_sliding_off_the_seat_keeps_the_gradient_bounded(engine, fixture):
+    d = torch.load(fixture, weights_only=True)
     sim = make_sim(
         d["T_horizon"], 2e-3, engine=engine, device=DEVICE, robot=d["robot"],
         res=d["world"]["res"], max_coord=d["world"]["max_coord"],

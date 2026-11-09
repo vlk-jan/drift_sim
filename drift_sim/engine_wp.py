@@ -39,6 +39,7 @@ import warp as wp
 from simulator.engine import NUM_WHEEL_POINTS as _NUM_WHEEL_POINTS
 from simulator.engine import SLIP_DIR_GRAD_EPS as _SLIP_DIR_GRAD_EPS
 from simulator.engine import SLIP_GRAD_FLOOR as _SLIP_GRAD_FLOOR
+from simulator.engine import SLIP_GRAD_GAIN as _SLIP_GRAD_GAIN
 from simulator.utils import contact_spring_constants
 
 wp.init()
@@ -51,6 +52,7 @@ NUM_WHEEL_POINTS = wp.constant(_NUM_WHEEL_POINTS)
 SLIP_DIR_GRAD_EPS = wp.constant(_SLIP_DIR_GRAD_EPS)
 # Rolling-speed floor of the slip ratio's derivative (see simulator/engine.py).
 SLIP_GRAD_FLOOR = wp.constant(_SLIP_GRAD_FLOOR)
+SLIP_GRAD_GAIN = wp.constant(_SLIP_GRAD_GAIN)
 
 
 # --- Helper math (device functions) ---
@@ -220,16 +222,16 @@ def depth_sum_kernel(
 
 
 @wp.func
-def slip_direction(v_slip: wp.vec3, v_mag: float) -> wp.vec3:
-    """Unit slip direction with a bounded derivative (simulator/engine.py
+def slip_direction(v_slip: wp.vec3, v_mag: float, eps: float) -> wp.vec3:
+    """Unit slip direction with a derivative bounded below eps (simulator/engine.py
     ::_SlipDirection)."""
     return v_slip / (v_mag + 1.0e-6)
 
 
 @wp.func_grad(slip_direction)
-def adj_slip_direction(v_slip: wp.vec3, v_mag: float, adj_ret: wp.vec3):
-    d = wp.max(v_mag, SLIP_DIR_GRAD_EPS)
-    if v_mag > SLIP_DIR_GRAD_EPS:
+def adj_slip_direction(v_slip: wp.vec3, v_mag: float, eps: float, adj_ret: wp.vec3):
+    d = wp.max(v_mag, eps)
+    if v_mag > eps:
         radial = wp.dot(adj_ret, v_slip)
         wp.adjoint[v_slip] += adj_ret / d - v_slip * radial / (d * d * d)
     else:
@@ -237,14 +239,14 @@ def adj_slip_direction(v_slip: wp.vec3, v_mag: float, adj_ret: wp.vec3):
 
 
 @wp.func
-def slip_ratio(v_mag: float, v_roll: float) -> float:
-    """v_mag / v_roll with the derivative floored (simulator/engine.py::SLIP_GRAD_FLOOR)."""
+def slip_ratio(v_mag: float, v_roll: float, v_grad: float) -> float:
+    """v_mag / v_roll, differentiated as 1 / v_grad (simulator/engine.py::SLIP_GRAD_GAIN)."""
     return v_mag / v_roll
 
 
 @wp.func_grad(slip_ratio)
-def adj_slip_ratio(v_mag: float, v_roll: float, adj_ret: float):
-    wp.adjoint[v_mag] += adj_ret / wp.max(v_roll, SLIP_GRAD_FLOOR)
+def adj_slip_ratio(v_mag: float, v_roll: float, v_grad: float, adj_ret: float):
+    wp.adjoint[v_mag] += adj_ret / v_grad
 
 
 @wp.func
@@ -343,12 +345,15 @@ def contact_point(
     g_t = wp.vec3(0.0, 0.0, -gravity) + (gravity * n_surf[2]) * n_surf
     v_slip = v_tangential + g_t * dt
     v_mag = wp.sqrt(wp.dot(v_slip, v_slip) + 1.0e-12)
-    v_dir = slip_direction(v_slip, v_mag)
+    # Gradient-only thresholds (simulator/engine.py::SLIP_GRAD_GAIN).
+    mu_gdt = f_val * gravity * dt / SLIP_GRAD_GAIN
+    v_dir = slip_direction(v_slip, v_mag, wp.max(mu_gdt, SLIP_DIR_GRAD_EPS))
 
     F_N = wp.max(wp.dot(F_spring, n_surf), 0.0)
     # Slip ratio s = |v_t| / max(|omega_w| r_w, floor) (see simulator/engine.py).
     v_roll = wp.max(wp.abs(controls[step, b][w]) * wheel_radii[w], slip_floor_velocity)
-    slip = slip_ratio(v_mag, v_roll)
+    v_grad = wp.max(wp.max(v_roll, SLIP_GRAD_FLOOR), mu_gdt / slip_ref_ratio)
+    slip = slip_ratio(v_mag, v_roll, v_grad)
     f_c_mag = f_val * F_N * wp.tanh(slip / slip_ref_ratio)
     if f_mag <= 0.0:
         f_c_mag = 0.0

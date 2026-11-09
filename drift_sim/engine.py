@@ -31,26 +31,34 @@ SLIP_DIR_GRAD_EPS = 2e-2
 # sliding off its seat (tests/test_spike_rollout_regression.py, batch 1019). The
 # bound is ~0.2 at mu 1; the forward is unchanged.
 SLIP_GRAD_FLOOR = 0.3
+# The same gain grows with mu: at mu 2.6 a wheel rolling at 0.45 m/s reaches ~1.1 and
+# the adjoint grows ~1e8 over a 0.3 s segment where finite differences stay ~1e-5
+# (tests/test_spike_rollout_regression.py, row 124). Each point's derivative floor is
+# therefore also mu g dt / (slip_ref_ratio SLIP_GRAD_GAIN): it binds only above
+# mu ~0.76 at dt 2e-3, slip_ref_ratio 0.1. The slip direction's derivative ~mu F_N / |v|
+# has the same gain with |v| for slip_ref_ratio v_roll, so its threshold is likewise
+# max(SLIP_DIR_GRAD_EPS, mu g dt / SLIP_GRAD_GAIN): binds above mu ~0.51.
+SLIP_GRAD_GAIN = 0.5
 
 
 class _SlipDirection(torch.autograd.Function):
-    """v / (|v| + 1e-6), backpropagated through the Jacobian of v / |v| above
-    SLIP_DIR_GRAD_EPS and through I / SLIP_DIR_GRAD_EPS below it; all of it goes
-    to v_slip, none to v_mag."""
+    """v / (|v| + 1e-6), backpropagated through the Jacobian of v / |v| above the
+    per-point threshold eps (>= SLIP_DIR_GRAD_EPS) and through I / eps below it;
+    all of it goes to v_slip, none to v_mag or eps."""
 
     @staticmethod
-    def forward(ctx, v_slip, v_mag):
-        ctx.save_for_backward(v_slip, v_mag)
+    def forward(ctx, v_slip, v_mag, eps):
+        ctx.save_for_backward(v_slip, v_mag, eps)
         return v_slip / (v_mag + 1e-6)
 
     @staticmethod
     def backward(ctx, grad):
-        v_slip, v_mag = ctx.saved_tensors
-        d = v_mag.clamp_min(SLIP_DIR_GRAD_EPS)
+        v_slip, v_mag, eps = ctx.saved_tensors
+        d = torch.maximum(v_mag, eps)
         radial = torch.where(
-            v_mag > SLIP_DIR_GRAD_EPS, (grad * v_slip).sum(dim=-1, keepdim=True), 0.0
+            v_mag > eps, (grad * v_slip).sum(dim=-1, keepdim=True), 0.0
         )
-        return grad / d - v_slip * radial / d.pow(3), None
+        return grad / d - v_slip * radial / d.pow(3), None, None
 
 
 # --- Rigid-body model ---
@@ -300,7 +308,12 @@ class DPhysicsEngine(torch.nn.Module):
         g_t = g_t - (g_t * normals).sum(dim=-1, keepdim=True) * normals
         v_slip = v_tangential + g_t * self.config.dt
         v_mag = torch.norm(v_slip, dim=-1, keepdim=True)
-        v_dir = _SlipDirection.apply(v_slip, v_mag)
+        # Gradient-only thresholds that keep the adjoint's per-step friction gain
+        # at or below SLIP_GRAD_GAIN (see SLIP_GRAD_GAIN); they carry no gradient.
+        mu_gdt = fric_coeffs.detach().unsqueeze(-1) * (
+            self.config.g * self.config.dt / SLIP_GRAD_GAIN
+        )  # (B, W, P, 1)
+        v_dir = _SlipDirection.apply(v_slip, v_mag, mu_gdt.clamp_min(SLIP_DIR_GRAD_EPS))
 
         # Penetration-depth shares (sum to 1; zero for a point at zero depth).
         depth = (-dh_points).clamp_min(0)
@@ -312,11 +325,13 @@ class DPhysicsEngine(torch.nn.Module):
         v_roll = (state.wheel_omega.abs().float() * self._wheel_radii).clamp_min(
             self.config.slip_floor_velocity
         )[:, :, None, None]  # (B, W, 1, 1)
-        # The value is v_mag / v_roll; the derivative is 1 / max(v_roll, SLIP_GRAD_FLOOR).
-        # v_roll follows the commands and carries no gradient.
-        slip = (v_mag / v_roll).detach() + (
-            v_mag - v_mag.detach()
-        ) / v_roll.clamp_min(SLIP_GRAD_FLOOR)
+        # The value is v_mag / v_roll; the derivative is 1 / max(v_roll,
+        # SLIP_GRAD_FLOOR, mu g dt / (slip_ref_ratio SLIP_GRAD_GAIN)). v_roll follows
+        # the commands and carries no gradient; neither does the floor.
+        v_grad = torch.maximum(
+            v_roll.clamp_min(SLIP_GRAD_FLOOR), mu_gdt / self.config.slip_ref_ratio
+        )
+        slip = (v_mag / v_roll).detach() + (v_mag - v_mag.detach()) / v_grad
         F_c = fric_coeffs.unsqueeze(-1) * F_N * torch.tanh(
             slip / self.config.slip_ref_ratio
         )
