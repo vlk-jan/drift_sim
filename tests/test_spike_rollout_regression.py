@@ -6,7 +6,7 @@ holds both rows' simulator inputs and the final pose each reaches.
 Row 83 is the field case of tests/test_low_slip_gradient.py. With the exact
 slip-direction derivative its gradient here is 7e8 (torch) and 7e7 (warp)
 instead of 22, and a 1e-8 m support field scales it by 1.5 (torch) and 15
-(warp). The final poses are the seated start's (simulator/utils.py::
+(warp). The final poses are the seated start's (utils.py::
 seat_on_terrain), torch's.
 """
 

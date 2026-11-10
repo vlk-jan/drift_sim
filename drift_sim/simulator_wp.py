@@ -1,9 +1,9 @@
 import torch
 
-from models.simulator import Simulator as TorchSimulator
-from simulator.engine_wp import WarpStaticEngine
-from simulator.utils import num_sim_steps
-from utils.geometry import quat_to_rotmat
+from drift_sim.engine_wp import WarpStaticEngine
+from drift_sim.geometry import quat_to_rotmat
+from drift_sim.simulator import Simulator as TorchSimulator
+from drift_sim.utils import num_sim_steps
 
 
 class Simulator(TorchSimulator):
@@ -15,11 +15,11 @@ class Simulator(TorchSimulator):
         dt=2e-3,
         com_transfer=True,
     ):
-        """Warp simulator wrapper; T_horizon must match models/simulator.py.
+        """Warp simulator wrapper; T_horizon must match simulator.py.
 
         predict_trajectory runs four kernel launches per physics step, replayed
         from captured graphs; a rollout that needs gradients records a Warp tape
-        (see simulator/engine_wp.py). vel_ts are absolute Unix timestamps,
+        (see engine_wp.py). vel_ts are absolute Unix timestamps,
         (B, Steps), and each element has its own window.
         """
         super().__init__(robot, device, T_horizon, dt, com_transfer)

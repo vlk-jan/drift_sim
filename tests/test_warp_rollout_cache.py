@@ -1,4 +1,4 @@
-"""The warp engine's captured, shape-cached rollout (simulator/engine_wp.py::_Rollout)."""
+"""The warp engine's captured, shape-cached rollout (engine_wp.py::_Rollout)."""
 
 import pytest
 import torch
@@ -32,9 +32,9 @@ def test_repeat_call_reuses_buffers_and_matches():
 
 
 def test_a_warm_call_on_new_terrain_matches_a_fresh_capture():
-    """The per-point contact flags (simulator/engine_wp.py) must not leak from one
+    """The per-point contact flags (engine_wp.py) must not leak from one
     call into the next: a stale "out of contact" would skip a point in contact."""
-    from simulator import engine_wp
+    from drift_sim import engine_wp
 
     g = torch.Generator().manual_seed(0)
     ground = [
@@ -102,7 +102,7 @@ def test_changed_shape_or_scalar_never_replays_a_stale_graph(change, monkeypatch
     call on an empty cache (a fresh capture), and differs from the warm result."""
     from dataclasses import replace
 
-    from simulator import engine_wp, utils
+    from drift_sim import engine_wp, utils
 
     # Another robot: the v2 rig on 0.36 m wheels.
     monkeypatch.setitem(
@@ -185,7 +185,7 @@ def test_no_grad_rollout_skips_the_adjoint_and_matches():
     """A rollout nothing will backpropagate (no_grad, or no input requiring grad)
     records no tape and allocates no gradient buffers; its poses equal a taped
     rollout's."""
-    from simulator import engine_wp
+    from drift_sim import engine_wp
 
     engine_wp._ROLLOUTS.clear()
     sim = make_sim(t_horizon=0.05, dt=0.005, engine="warp")
@@ -215,7 +215,7 @@ def test_a_no_grad_rollout_keeps_the_arrays_its_graph_writes():
 
     import warp as wp
 
-    from simulator import engine_wp
+    from drift_sim import engine_wp
 
     engine_wp._ROLLOUTS.clear()
     sim = make_sim(t_horizon=0.05, dt=0.005, engine="warp", device="cuda")

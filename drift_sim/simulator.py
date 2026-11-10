@@ -2,8 +2,9 @@ from typing import Optional
 
 import torch
 
-from simulator.engine import DPhysicsEngine
-from simulator.utils import (
+from drift_sim.engine import DPhysicsEngine
+from drift_sim.geometry import quat_to_rotmat
+from drift_sim.utils import (
     PhysicsEngineConfig,
     PhysicsState,
     WorldConfig,
@@ -12,7 +13,6 @@ from simulator.utils import (
     robot_model_config,
     seat_on_terrain,
 )
-from utils.geometry import quat_to_rotmat
 
 
 def _update_world_config(
@@ -203,7 +203,7 @@ class Simulator(torch.nn.Module):
         A GT seed or the plane fit puts the rim points at arbitrary depth: deep
         ones launch the robot at t=0, and a start at zero depth sinks onto the
         sag. Returns a new position (`x` may be a view into GT data). Shared with
-        the warp wrapper via simulator/utils.py.
+        the warp wrapper via utils.py.
         """
         return seat_on_terrain(self._geom, x, q, world_config)
 

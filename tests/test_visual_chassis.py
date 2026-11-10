@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from simulator.utils import (
+from drift_sim.utils import (
     HELHEST_CHASSIS,
     HELHEST_CHASSIS_CENTER,
     WHEEL_VISUAL_WIDTH,

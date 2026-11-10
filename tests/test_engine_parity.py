@@ -185,7 +185,7 @@ def _brake_rollout(engine):
 
 def test_brake_to_stop_settles_and_matches_torch():
     """A braked robot must come to rest in both engines (the friction cut in
-    simulator/engine.py::_friction), with matching pose and gradients."""
+    engine.py::_friction), with matching pose and gradients."""
     pos_t, late_t, gs_t, gf_t = _brake_rollout("torch")
     pos_w, late_w, gs_w, gf_w = _brake_rollout("warp")
     assert late_t < 1e-4 and late_w < 1e-4, (late_t, late_w)
@@ -290,7 +290,7 @@ def test_include_start_prepends_the_seated_start(engine):
     """include_start returns the state the rollout steps from first, at vel_ts[:, 0]:
     the seed seated on the terrain (the segmented loss anchors on it), its seeded
     velocities; the steps after it are the default call's."""
-    from models.simulator import _build_world_config
+    from drift_sim.simulator import _build_world_config
 
     t_horizon = 20 * DT
     sim = _make_sim(engine, t_horizon)
@@ -447,7 +447,7 @@ def _fd_rel_errors(engine, terrain, eps=5e-4):
     ground and touches down. "rough": the differentiable seat sets the start
     height on the terrain, as for every GT-seeded training segment.
     """
-    from models.simulator import _build_world_config
+    from drift_sim.simulator import _build_world_config
 
     n_steps = 250
     t_horizon = n_steps * DT
@@ -580,8 +580,8 @@ def test_both_wrappers_share_one_default_horizon():
     """
     import inspect
 
-    from models.simulator import Simulator as TorchSim
-    from models.simulator_wp import Simulator as WarpSim
+    from drift_sim.simulator import Simulator as TorchSim
+    from drift_sim.simulator_wp import Simulator as WarpSim
 
     defaults = {
         cls.__module__: inspect.signature(cls.__init__).parameters["T_horizon"].default
@@ -592,9 +592,9 @@ def test_both_wrappers_share_one_default_horizon():
 
 def test_wheel_geometry_has_one_source():
     """Both wrappers read the URDF geometry from simulator.utils, not a copy."""
-    from models.simulator import Simulator as TorchSim
-    from models.simulator_wp import Simulator as WarpSim
-    from simulator.utils import robot_model_config
+    from drift_sim.simulator import Simulator as TorchSim
+    from drift_sim.simulator_wp import Simulator as WarpSim
+    from drift_sim.utils import robot_model_config
 
     ref = robot_model_config("helhest_v2")
     assert torch.allclose(
@@ -652,7 +652,7 @@ def test_warp_kernels_have_no_dynamic_loops():
     import pathlib
 
     src_path = (
-        pathlib.Path(__file__).resolve().parents[1] / "simulator" / "engine_wp.py"
+        pathlib.Path(__file__).resolve().parents[1] / "drift_sim" / "engine_wp.py"
     )
     tree = ast.parse(src_path.read_text())
 

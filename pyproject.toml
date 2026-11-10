@@ -1,0 +1,38 @@
+[project]
+name = "drift_sim"
+version = "0.1.0"
+description = "Differentiable skid-steer robot simulator over terrain height and friction maps"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "torch>=2.9",
+    # Pinned, not floored: a Warp bump can move simulated trajectories.
+    # Bump deliberately and re-run tests/test_engine_parity.py.
+    "warp-lang==1.14.0",
+]
+
+[project.optional-dependencies]
+# SimView scene helpers (add_helhest_visual_body / _wheels).
+viz = ["simview>=6.4.0", "einops>=0.8"]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1", "ruff>=0.16"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["drift_sim"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

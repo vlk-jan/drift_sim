@@ -1,8 +1,9 @@
 import torch
 import torch.nn.functional as F
 
-from simulator.numerical import integrate_quaternion
-from simulator.utils import (
+from drift_sim.geometry import quat_to_rotmat
+from drift_sim.numerical import integrate_quaternion
+from drift_sim.utils import (
     PhysicsEngineConfig,
     PhysicsState,
     PhysicsStateDer,
@@ -10,9 +11,8 @@ from simulator.utils import (
     WorldConfig,
     contact_spring_constants,
 )
-from utils.geometry import quat_to_rotmat
 
-# Rim sample points per wheel, shared with simulator/engine_wp.py. The polygon
+# Rim sample points per wheel, shared with engine_wp.py. The polygon
 # chord costs r (1 - cos(pi / N)) of radius where the local ground tilts against
 # the body: 6.4 mm at 16 (~ the 7.3 mm tyre sag), 1.6 mm at 32.
 NUM_WHEEL_POINTS = 32

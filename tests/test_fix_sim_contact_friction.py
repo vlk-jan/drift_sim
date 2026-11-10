@@ -6,8 +6,8 @@ import pytest
 import torch
 from _helpers import make_sim
 
-from simulator.engine import DPhysicsEngine
-from simulator.utils import (
+from drift_sim.engine import DPhysicsEngine
+from drift_sim.utils import (
     PhysicsEngineConfig,
     PhysicsState,
     WorldConfig,

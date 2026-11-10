@@ -59,7 +59,7 @@ def test_impulse_cut_is_inert_while_driving():
     pivot turn whose dragged rear wheel slides under drive torque (a gravity-only
     cap would clip it on 998/1000 steps). Checks the engine's own rule.
     """
-    from simulator.utils import PhysicsState, WorldConfig
+    from drift_sim.utils import PhysicsState, WorldConfig
 
     def cut_steps(robot="helhest_v2", omega=(3.0, 3.0, 3.0), t=0.2, dt=2e-3):
         sim = _make_sim_factory(
@@ -107,7 +107,7 @@ def test_com_transfer_defaults_on_and_is_live():
     ramp = torch.linspace(-1.0, 1.0, GRID_N)
     props["support"] = 0.06 * ramp.view(1, 1, -1).expand(1, GRID_N, GRID_N).clone()
 
-    from simulator.utils import PhysicsEngineConfig
+    from drift_sim.utils import PhysicsEngineConfig
 
     assert PhysicsEngineConfig().com_transfer is True
     assert _make_sim(0.2).engine.config.com_transfer is True
@@ -173,7 +173,7 @@ def test_a_seeded_start_is_seated_on_its_sag(engine):
     ~1 mrad tilt is left to settle (z within 0.5 mm; at zero depth it sank
     4.7 mm), and from the settled attitude nothing moves at all.
     """
-    from utils.geometry import rotmat_to_quat_batch
+    from drift_sim.geometry import rotmat_to_quat_batch
 
     dt, t = 2e-3, 0.6
     sim = _make_sim_factory(t, dt, engine=engine, max_coord=MAX_COORD - RES / 2,

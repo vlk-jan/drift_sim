@@ -9,7 +9,7 @@ silently scrambles the terrain-trajectory coupling.
 import torch
 from _helpers import sample_height
 
-from simulator.utils import WorldConfig
+from drift_sim.utils import WorldConfig
 
 
 def _x_ramp_heightmap(n, res):

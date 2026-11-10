@@ -5,8 +5,8 @@ from typing import Tuple, Union
 
 import torch
 
-from simulator.numerical import interpolate_grid
-from utils.geometry import quat_to_rotmat
+from drift_sim.geometry import quat_to_rotmat
+from drift_sim.numerical import interpolate_grid
 
 
 # --- Configuration classes ---
@@ -302,7 +302,7 @@ class PhysicsEngineConfig:
         torque_limit (float): clip on the net torque about the CoG. Default 5000 Nm.
         damping_alpha (float): contact damping in units of critical heave
             damping, at the rest sag only: it scales with depth and is capped
-            per point (simulator/engine.py::_calculate_spring_force). Default 2.0.
+            per point (engine.py::_calculate_spring_force). Default 2.0.
         ang_damping (float): angular damping coefficient. Default 0.1.
         com_transfer (bool): integrate acceleration onto the body origin rather
             than treating the origin as the CoM. See the field comment below.
@@ -346,7 +346,7 @@ def contact_spring_constants(robot_model, config):
     """(k, lam): the contact law's spring and damping constants, as floats.
 
     k is the robot's whole-robot tyre stiffness; lam = b k / (m g) with
-    b = damping_alpha 2 sqrt(m k) (simulator/engine.py::_calculate_spring_force).
+    b = damping_alpha 2 sqrt(m k) (engine.py::_calculate_spring_force).
     Both engines take them from here, so they run on the same numbers.
     """
     m, k = float(robot_model.mass), float(robot_model.contact_stiffness)
@@ -620,7 +620,7 @@ def seat_on_terrain(engine, x, q, world_config):
     A vertical shift leaves every rim point's xy, so after lifting by s each
     wheel's deepest penetration is G_w - s, with G_w its largest vertical gap
     terrain_z - point_z now. Each wheel is a spring of k / n_wheels on that depth
-    (simulator/engine.py::_calculate_spring_force), so the springs carry the
+    (engine.py::_calculate_spring_force), so the springs carry the
     robot's weight when sum_w relu(G_w - s) = m g n_wheels / k. Over the wheels
     sorted deepest first, every s_j = (sum_{i<=j} G_i - m g n_wheels / k) / j
     bounds the solution from below and the actual contact set attains it, so

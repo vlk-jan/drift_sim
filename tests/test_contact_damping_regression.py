@@ -2,7 +2,7 @@
 
 The depth-proportional damping is explicit in the velocity; without the per-point
 damping-impulse cap the adjoint blows up past ~56 mm / alpha of penetration while
-the forward stays finite (see simulator/engine.py::_calculate_spring_force). The
+the forward stays finite (see engine.py::_calculate_spring_force). The
 start is pressed PRESS_M below its seat, past that depth at alpha 2.0: uncapped,
 the gradient norm is 7e10 here (torch); capped, 1e4.
 """

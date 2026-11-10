@@ -1,4 +1,4 @@
-"""Warp port of the spring-contact engine in simulator/engine.py.
+"""Warp port of the spring-contact engine in engine.py.
 
 Same physics (hard contact gate, Hunt-Crossley spring `relu(depth*k - c*vn)` with
 the damping c capped per point, vn the body velocity of the point along the
@@ -36,11 +36,11 @@ import numpy as np
 import torch
 import warp as wp
 
-from simulator.engine import NUM_WHEEL_POINTS as _NUM_WHEEL_POINTS
-from simulator.engine import SLIP_DIR_GRAD_EPS as _SLIP_DIR_GRAD_EPS
-from simulator.engine import SLIP_GRAD_FLOOR as _SLIP_GRAD_FLOOR
-from simulator.engine import SLIP_GRAD_GAIN as _SLIP_GRAD_GAIN
-from simulator.utils import contact_spring_constants
+from drift_sim.engine import NUM_WHEEL_POINTS as _NUM_WHEEL_POINTS
+from drift_sim.engine import SLIP_DIR_GRAD_EPS as _SLIP_DIR_GRAD_EPS
+from drift_sim.engine import SLIP_GRAD_FLOOR as _SLIP_GRAD_FLOOR
+from drift_sim.engine import SLIP_GRAD_GAIN as _SLIP_GRAD_GAIN
+from drift_sim.utils import contact_spring_constants
 
 wp.init()
 
@@ -48,9 +48,9 @@ wp.init()
 # parameters (see module docstring).
 NUM_WHEELS = wp.constant(3)
 NUM_WHEEL_POINTS = wp.constant(_NUM_WHEEL_POINTS)
-# Bound on the slip direction's derivative near rest (see simulator/engine.py).
+# Bound on the slip direction's derivative near rest (see engine.py).
 SLIP_DIR_GRAD_EPS = wp.constant(_SLIP_DIR_GRAD_EPS)
-# Rolling-speed floor of the slip ratio's derivative (see simulator/engine.py).
+# Rolling-speed floor of the slip ratio's derivative (see engine.py).
 SLIP_GRAD_FLOOR = wp.constant(_SLIP_GRAD_FLOOR)
 SLIP_GRAD_GAIN = wp.constant(_SLIP_GRAD_GAIN)
 
@@ -80,7 +80,7 @@ def sample_grid_bilinear(
 ):
     """Bilinearly sample batch element `b`, replicating the border.
 
-    Matches simulator/engine.py's padding_mode="border"; zero padding would put a
+    Matches engine.py's padding_mode="border"; zero padding would put a
     phantom cliff at the map edge. A rollout leaving the map thus continues on the
     border height silently.
     """
@@ -143,7 +143,7 @@ def get_wheel_point_local(i: int, total_points: int, radius: float):
 def sinc_stable(theta: float):
     """Return sin(theta)/theta, finite and differentiable at theta = 0.
 
-    Mirrors torch.sinc(theta/pi) in simulator/numerical.py::integrate_quaternion.
+    Mirrors torch.sinc(theta/pi) in numerical.py::integrate_quaternion.
     """
     if theta < 1.0e-4:
         t2 = theta * theta
@@ -223,7 +223,7 @@ def depth_sum_kernel(
 
 @wp.func
 def slip_direction(v_slip: wp.vec3, v_mag: float, eps: float) -> wp.vec3:
-    """Unit slip direction with a derivative bounded below eps (simulator/engine.py
+    """Unit slip direction with a derivative bounded below eps (engine.py
     ::_SlipDirection)."""
     return v_slip / (v_mag + 1.0e-6)
 
@@ -240,7 +240,7 @@ def adj_slip_direction(v_slip: wp.vec3, v_mag: float, eps: float, adj_ret: wp.ve
 
 @wp.func
 def slip_ratio(v_mag: float, v_roll: float, v_grad: float) -> float:
-    """v_mag / v_roll, differentiated as 1 / v_grad (simulator/engine.py::SLIP_GRAD_GAIN)."""
+    """v_mag / v_roll, differentiated as 1 / v_grad (engine.py::SLIP_GRAD_GAIN)."""
     return v_mag / v_roll
 
 
@@ -321,9 +321,9 @@ def contact_point(
     vn = wp.dot(v_body, n_surf)
 
     # Hunt-Crossley damping, zero at zero depth: depth * damping_lam / n_wheels
-    # (see simulator/engine.py; constants from contact_spring_constants).
+    # (see engine.py; constants from contact_spring_constants).
     # Wheel spring k / n_wheels on its deepest point, shared by depth (see
-    # simulator/engine.py).
+    # engine.py).
     depth = (
         -dist
         * wheel_depth_max[step, b, w]
@@ -339,18 +339,18 @@ def contact_point(
     f_mag = wp.max(depth * stiffness / float(NUM_WHEELS) - c * vn, 0.0)
     F_spring = n_surf * f_mag
 
-    # Friction uses the tangential velocity only (see simulator/engine.py).
+    # Friction uses the tangential velocity only (see engine.py).
     v_tangential = v_total - wp.dot(v_total, n_surf) * n_surf
-    # Slip at the end of the step under gravity (see simulator/engine.py).
+    # Slip at the end of the step under gravity (see engine.py).
     g_t = wp.vec3(0.0, 0.0, -gravity) + (gravity * n_surf[2]) * n_surf
     v_slip = v_tangential + g_t * dt
     v_mag = wp.sqrt(wp.dot(v_slip, v_slip) + 1.0e-12)
-    # Gradient-only thresholds (simulator/engine.py::SLIP_GRAD_GAIN).
+    # Gradient-only thresholds (engine.py::SLIP_GRAD_GAIN).
     mu_gdt = f_val * gravity * dt / SLIP_GRAD_GAIN
     v_dir = slip_direction(v_slip, v_mag, wp.max(mu_gdt, SLIP_DIR_GRAD_EPS))
 
     F_N = wp.max(wp.dot(F_spring, n_surf), 0.0)
-    # Slip ratio s = |v_t| / max(|omega_w| r_w, floor) (see simulator/engine.py).
+    # Slip ratio s = |v_t| / max(|omega_w| r_w, floor) (see engine.py).
     v_roll = wp.max(wp.abs(controls[step, b][w]) * wheel_radii[w], slip_floor_velocity)
     v_grad = wp.max(wp.max(v_roll, SLIP_GRAD_FLOOR), mu_gdt / slip_ref_ratio)
     slip = slip_ratio(v_mag, v_roll, v_grad)
@@ -359,7 +359,7 @@ def contact_point(
         f_c_mag = 0.0
 
     # Impulse limit: stop the slip in one step through the effective mass,
-    # shared by depth (see simulator/engine.py::_friction).
+    # shared by depth (see engine.py::_friction).
     r_x_t = wp.cross(r, v_dir)
     inv_m_eff = 1.0 / mass + wp.dot(
         r_x_t, wp.quat_rotate(q, inertia_body_inv * wp.quat_rotate_inv(q, r_x_t))
@@ -488,7 +488,7 @@ def friction_cut_kernel(
     torque_cut: wp.array2d(dtype=wp.vec3),
 ):
     """Pass 3: cap friction at the impulse limit where the uncut law would
-    reverse the point's slip by the end of the step (simulator/engine.py
+    reverse the point's slip by the end of the step (engine.py
     ::_friction); the removed friction accumulates as a separate wrench."""
     b, w, i = wp.tid()
     # 2 marks a contact this pass left uncut, which the adjoint then skips.
@@ -558,7 +558,7 @@ def integrate_kernel(
 
     # state.x is the body origin, not the CoM; com_transfer > 0 subtracts
     # alpha x r + omega x (omega x r), r = quat_rotate(q, cog). On by default,
-    # as in simulator/engine.py.
+    # as in engine.py.
     if com_transfer > 0.0:
         r_com = wp.quat_rotate(q, cog)
         acc = acc - wp.cross(omega_d, r_com) - wp.cross(omega, wp.cross(omega, r_com))
@@ -843,7 +843,7 @@ class WarpTrajectoryFunc(torch.autograd.Function):
 
         need = ctx.needs_input_grad
         # The initial state's adjoint is what the tape left in state_*.grad[0]
-        # (x0 takes one through the seat, simulator/utils.py::
+        # (x0 takes one through the seat, utils.py::
         # seat_on_terrain; the rest when a caller seeds them with grad).
         init = [
             wp.to_torch(s.grad)[0].clone() if need[i] else None
