@@ -842,7 +842,7 @@ def generate_dynamic_maneuvers(duration, dt, num_robots, device, seed=42):
 WHEEL_VISUAL_WIDTH = 0.142  # tyre width, visual only -- no dynamics reads it
 
 # THE DRAWN CHASSIS. Visual only: no dynamics reads it, the engine knows the
-# robot as three wheel contacts plus mass/inertia (simulator/engine*.py).
+# robot as three wheel contacts plus mass/inertia (drift_sim/engine*.py).
 #
 # These are the machine's envelope, matching dataset_tools' viewer
 # (dataset_tools/viewer/build.py CHASSIS / CHASSIS_CENTER) so the same robot is

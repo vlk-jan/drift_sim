@@ -591,7 +591,7 @@ def test_both_wrappers_share_one_default_horizon():
 
 
 def test_wheel_geometry_has_one_source():
-    """Both wrappers read the URDF geometry from simulator.utils, not a copy."""
+    """Both wrappers read the URDF geometry from drift_sim.utils, not a copy."""
     from drift_sim.simulator import Simulator as TorchSim
     from drift_sim.simulator_wp import Simulator as WarpSim
     from drift_sim.utils import robot_model_config

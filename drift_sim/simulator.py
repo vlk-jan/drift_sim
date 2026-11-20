@@ -69,6 +69,9 @@ def _apply_initial_state_override(state, initial_state, device):
                 f"expected {state.x.shape[0]}"
             )
         setattr(state, k, v.to(device, torch.float32))
+    if "q" in (initial_state or ()):
+        # Warp rotates with q as given; torch normalises on read.
+        state.q = torch.nn.functional.normalize(state.q, dim=-1)
     return state
 
 
@@ -222,7 +225,7 @@ class Simulator(torch.nn.Module):
         ----------
         properties : dict
             - "support": (B, H, W) support surface (height_map - height_residual).
-            - "friction": (B, H, W) or scalar.
+            - "friction": (B, H, W).
             Stiffness is the robot's ``contact_stiffness``; a "stiffness" key
             raises.
         vel_ctrl : torch.Tensor

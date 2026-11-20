@@ -110,7 +110,7 @@ def sample_normal_bilinear(
 ):
     """Bilinearly sample a normal field, renormalized after interpolation.
 
-    Vertical off the map, where the border height extends flat (simulator/
+    Vertical off the map, where the border height extends flat (drift_sim/
     engine.py::_sample_terrain)."""
     if u < 0.0 or u > float(width - 1) or v < 0.0 or v > float(height - 1):
         return wp.vec3(0.0, 0.0, 1.0)
@@ -185,7 +185,7 @@ def depth_sum_kernel(
     sum and max it per wheel; mark each point in (1) or out of (-1) contact.
 
     The friction and damping impulse limits share over the contacts by depth,
-    and a wheel's spring acts on its deepest point shared by depth (simulator/
+    and a wheel's spring acts on its deepest point shared by depth (drift_sim/
     engine.py::_calculate_spring_force), so these need their own launch before
     force accumulation.
     """
