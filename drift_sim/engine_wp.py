@@ -42,7 +42,8 @@ from drift_sim.engine import SLIP_GRAD_FLOOR as _SLIP_GRAD_FLOOR
 from drift_sim.engine import SLIP_GRAD_GAIN as _SLIP_GRAD_GAIN
 from drift_sim.utils import contact_spring_constants
 
-wp.init()
+# No wp.init() here: Warp initialises on first use. An import-time init ran in
+# every process that imports drift_sim, DataLoader workers included.
 
 # Compile-time constants so their loops unroll; don't make these kernel
 # parameters (see module docstring).
